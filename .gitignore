@@ -1,5 +1,6 @@
 /target
 /node_modules
+/gui/node_modules
 /dist
 /gui/src-tauri/target
 /gui/.vite
