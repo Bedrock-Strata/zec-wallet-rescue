@@ -6,7 +6,7 @@ use std::sync::{
 use async_trait::async_trait;
 use prost::Message;
 use rand_core::OsRng;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use rustls::crypto::ring::default_provider;
 use secrecy::SecretVec;
 use tokio::sync::Mutex;
@@ -893,19 +893,24 @@ fn account_has_note_activity(
     account_uuid: &AccountUuid,
 ) -> Result<bool, rusqlite::Error> {
     let uuid_bytes = account_uuid.expose_uuid().into_bytes();
+    // Resolve the internal integer id once to avoid repeating the subquery and
+    // to sidestep potential issues if uuid is not unique-constrained.
+    let account_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM accounts WHERE uuid = ?1",
+            params![uuid_bytes.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let account_id = match account_id {
+        Some(id) => id,
+        None => return Ok(false),
+    };
     conn.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM sapling_received_notes
-            WHERE account_id = (SELECT id FROM accounts WHERE uuid = ?1)
-            UNION ALL
-            SELECT 1 FROM orchard_received_notes
-            WHERE account_id = (SELECT id FROM accounts WHERE uuid = ?1)
-            UNION ALL
-            SELECT 1 FROM transparent_received_outputs
-            WHERE account_id = (SELECT id FROM accounts WHERE uuid = ?1)
-            LIMIT 1
-        )",
-        params![uuid_bytes.as_slice()],
+        "SELECT EXISTS(SELECT 1 FROM sapling_received_notes WHERE account_id = ?1)
+             OR EXISTS(SELECT 1 FROM orchard_received_notes WHERE account_id = ?1)
+             OR EXISTS(SELECT 1 FROM transparent_received_outputs WHERE account_id = ?1)",
+        params![account_id],
         |row| row.get(0),
     )
 }
@@ -1088,5 +1093,61 @@ mod tests {
         // With gap_limit=2, the trailing 2 accounts are [1, 2].
         // Account 1 has_activity=true, so the gap limit should NOT fire.
         assert!(!trailing_gap_limit_reached(&accounts, 2));
+    }
+
+    #[test]
+    fn gap_limit_boundary_with_spent_account_at_edge() {
+        // Layout: [active, empty, spent] with gap_limit=2.
+        // Trailing window = [empty, spent]. The spent account has activity,
+        // so the gap limit should NOT fire.
+        let accounts = vec![
+            AccountBalancePreview {
+                account_index: 0,
+                sapling_address: "zs".to_owned(),
+                unified_address: "u".to_owned(),
+                transparent_receive_address: "t1".to_owned(),
+                transparent_change_address: "t2".to_owned(),
+                transparent_utxo_count: 0,
+                sapling_zatoshis: 100,
+                orchard_zatoshis: 0,
+                transparent_zatoshis: 0,
+                total_zatoshis: 100,
+                has_activity: true,
+                status: "found".to_owned(),
+            },
+            AccountBalancePreview {
+                account_index: 1,
+                sapling_address: "zs".to_owned(),
+                unified_address: "u".to_owned(),
+                transparent_receive_address: "t1".to_owned(),
+                transparent_change_address: "t2".to_owned(),
+                transparent_utxo_count: 0,
+                sapling_zatoshis: 0,
+                orchard_zatoshis: 0,
+                transparent_zatoshis: 0,
+                total_zatoshis: 0,
+                has_activity: false,
+                status: "empty".to_owned(),
+            },
+            AccountBalancePreview {
+                account_index: 2,
+                sapling_address: "zs".to_owned(),
+                unified_address: "u".to_owned(),
+                transparent_receive_address: "t1".to_owned(),
+                transparent_change_address: "t2".to_owned(),
+                transparent_utxo_count: 0,
+                sapling_zatoshis: 0,
+                orchard_zatoshis: 0,
+                transparent_zatoshis: 0,
+                total_zatoshis: 0,
+                has_activity: true, // spent account at boundary
+                status: "previously active".to_owned(),
+            },
+        ];
+
+        // Trailing 2 = [empty, spent]. Spent has activity, so gap limit does NOT fire.
+        assert!(!trailing_gap_limit_reached(&accounts, 2));
+        // But with gap_limit=1, trailing 1 = [spent], which has activity -- still no trigger.
+        assert!(!trailing_gap_limit_reached(&accounts, 1));
     }
 }
