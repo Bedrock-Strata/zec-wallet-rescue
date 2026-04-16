@@ -60,7 +60,7 @@ This document tracks the testing strategy for ZECK — a ZecWallet Lite recovery
 - [ ] "I understand this is irreversible" checkbox must be checked before Execute is enabled
 - [ ] Back button returns to scan results without losing scan data
 - [ ] `propose_sweep` failure surfaces as a readable error (not silent)
-- [ ] Execute sweep button currently returns a `SweepNotImplemented` error — verify error message is shown clearly to user, not a crash or hang
+- [ ] Execute sweep button triggers real sweep — verify broadcast results and transaction IDs are shown
 
 ### Step 6: Complete / Report
 - [ ] Recovery report text displayed on screen
@@ -96,7 +96,7 @@ This document tracks the testing strategy for ZECK — a ZecWallet Lite recovery
 | N11 | Orchard funds present | Correct Orchard balance shown |
 | N12 | Spent-account gap limit | Scanner does NOT stop at spent account; continues to find funded accounts beyond it |
 | N13 | Sweep proposal generated | Amounts + fees match expected; proposal screen renders |
-| N14 | Execute sweep | Currently returns `SweepNotImplemented` — verify error is user-readable |
+| N14 | Execute sweep | Broadcasts transactions; verify txids and confirmation status shown in UI |
 
 ---
 
@@ -147,7 +147,7 @@ zeck-cli sweep \
 
 | Item | Status |
 |------|--------|
-| Sweep execution (`execute_sweep`) | `SweepNotImplemented` — not wired up yet |
+| Sweep execution (`execute_sweep`) | **Implemented** — full shielding + broadcast + confirmation polling |
 | Windows WebView2 on Win10 < 1803 | Untested |
 | Code signing (Apple notarization, Windows Authenticode) | Ownership unresolved |
 
@@ -163,4 +163,4 @@ zeck-cli sweep \
 
 ---
 
-*Last updated: 2026-04-12*
+*Last updated: 2026-04-15*

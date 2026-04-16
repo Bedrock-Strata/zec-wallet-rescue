@@ -197,6 +197,119 @@ fn normalize_words(words: &[String]) -> ZeckResult<String> {
         .join(" "))
 }
 
+#[cfg(test)]
+mod tests {
+    use secrecy::SecretString;
+
+    use super::*;
+
+    // Standard BIP-39 test vector: 24× "abandon" + "art"
+    const TEST_SEED: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon \
+         abandon abandon abandon abandon abandon abandon abandon abandon \
+         abandon abandon abandon abandon abandon abandon abandon art";
+
+    fn test_seed() -> SecretString {
+        SecretString::new(TEST_SEED.to_owned())
+    }
+
+    #[test]
+    fn valid_24_word_seed_validates() {
+        let words: Vec<String> = TEST_SEED.split_whitespace().map(str::to_owned).collect();
+        assert!(validate_mnemonic_words(&words).is_ok());
+    }
+
+    #[test]
+    fn wrong_word_count_rejected() {
+        let words: Vec<String> = TEST_SEED
+            .split_whitespace()
+            .take(23)
+            .map(str::to_owned)
+            .collect();
+        let err = validate_mnemonic_words(&words).unwrap_err();
+        assert!(matches!(err, ZeckError::InvalidMnemonic(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn non_bip39_word_rejected() {
+        let mut words: Vec<String> = TEST_SEED.split_whitespace().map(str::to_owned).collect();
+        words[0] = "zzzznotaword".to_owned();
+        let err = validate_mnemonic_words(&words).unwrap_err();
+        assert!(matches!(err, ZeckError::InvalidMnemonic(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn words_with_whitespace_padding_validated() {
+        let mut words: Vec<String> = TEST_SEED.split_whitespace().map(str::to_owned).collect();
+        words[0] = "  abandon  ".to_owned(); // leading/trailing spaces
+        assert!(validate_mnemonic_words(&words).is_ok());
+    }
+
+    #[test]
+    fn derive_accounts_mainnet_produces_expected_account_0_addresses() {
+        let accounts = derive_accounts(&test_seed(), ZeckNetwork::Mainnet, 1).unwrap();
+        assert_eq!(accounts.len(), 1);
+        let acc = &accounts[0];
+
+        // Verify the known values produced by `zeck-cli show-keys` with this seed
+        assert_eq!(
+            acc.unified_address,
+            "u1nvgt6yr35mhc9wdf4wckvl38476vqy96dx3cwkfdwy4jet9300l5v8l2yg27ql7w9qwm0lf8kncnj9nus4mgete06j3cu3mhrqvstg6swvdya6xgzwhh6a9xxdhxkavvvmztqeuaurjtqfk3dzetuzgnu0zjvmdpe8ehvj53sy6yhzxj"
+        );
+        assert_eq!(
+            acc.sapling_address,
+            "zs16uhd4mux24se6wkm74vld0ec63d4dxt3d7m80l5xytreplkkllrrf9c7fj859mhp8tkcq9hxfvj"
+        );
+        assert_eq!(acc.transparent_receive_address, "t1dUDJ62ANtmebE8drFg7g2MWYwXHQ6Xu3F");
+        assert_eq!(acc.transparent_change_address, "t1eFjJFc6eRbhVLeDwsAkjTQoUid6LHi631");
+        assert_eq!(acc.index, 0);
+    }
+
+    #[test]
+    fn derive_accounts_produces_distinct_addresses_per_account() {
+        let accounts = derive_accounts(&test_seed(), ZeckNetwork::Mainnet, 3).unwrap();
+        assert_eq!(accounts.len(), 3);
+
+        // All unified addresses must be different
+        let uas: Vec<_> = accounts.iter().map(|a| &a.unified_address).collect();
+        assert_ne!(uas[0], uas[1]);
+        assert_ne!(uas[1], uas[2]);
+
+        // All transparent receive addresses must be different
+        let tras: Vec<_> = accounts.iter().map(|a| &a.transparent_receive_address).collect();
+        assert_ne!(tras[0], tras[1]);
+        assert_ne!(tras[1], tras[2]);
+    }
+
+    #[test]
+    fn derive_accounts_mainnet_and_testnet_addresses_differ() {
+        let mainnet = derive_accounts(&test_seed(), ZeckNetwork::Mainnet, 1).unwrap();
+        let testnet = derive_accounts(&test_seed(), ZeckNetwork::Testnet, 1).unwrap();
+
+        assert_ne!(mainnet[0].unified_address, testnet[0].unified_address);
+        assert_ne!(mainnet[0].sapling_address, testnet[0].sapling_address);
+        assert_ne!(
+            mainnet[0].transparent_receive_address,
+            testnet[0].transparent_receive_address
+        );
+    }
+
+    #[test]
+    fn derive_zero_accounts_returns_empty_vec() {
+        let accounts = derive_accounts(&test_seed(), ZeckNetwork::Mainnet, 0).unwrap();
+        assert!(accounts.is_empty());
+    }
+
+    #[test]
+    fn derive_accounts_path_strings_are_correct() {
+        let accounts = derive_accounts(&test_seed(), ZeckNetwork::Mainnet, 1).unwrap();
+        let acc = &accounts[0];
+        assert_eq!(acc.sapling_path, "m_Sapling / 32' / 133' / 0'");
+        assert_eq!(acc.transparent_receive_path, "m / 44' / 133' / 0' / 0 / 0");
+        assert_eq!(acc.transparent_change_path, "m / 44' / 133' / 0' / 1 / 0");
+    }
+}
+
 impl From<AddressScope> for TransparentKeyScope {
     fn from(value: AddressScope) -> Self {
         match value {

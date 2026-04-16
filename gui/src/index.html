@@ -135,7 +135,7 @@
             </label>
             <label class="field span-two">
               <span>Recovery workspace directory</span>
-              <input id="data-dir" type="text" value="./zeck_data" />
+              <input id="data-dir" type="text" value="/tmp/zeck_data" />
             </label>
             <label class="field span-two">
               <span>Destination Unified Address</span>
@@ -212,6 +212,7 @@
           <div class="report-card" id="scan-discoveries"></div>
           <div class="actions split">
             <button class="secondary" id="cancel-scan">Cancel</button>
+            <button class="ghost" id="back-to-config" style="display:none" data-prev="config">← Back to config</button>
             <button class="primary" id="review-sweep" disabled>Review & Sweep</button>
           </div>
         </section>
@@ -274,6 +275,6 @@
       </main>
     </div>
 
-    <script type="module" src="./main.js"></script>
+    <script src="./main.js"></script>
   </body>
 </html>
