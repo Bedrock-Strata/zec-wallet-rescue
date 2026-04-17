@@ -97,6 +97,13 @@ document.querySelectorAll(".step-list li").forEach((li) => {
         setStatus("config-status", "", "");
       }
       goTo(target);
+    } else {
+      // Show a brief tooltip on the step that can't be reached yet
+      const prev = steps[targetIdx - 1];
+      const prevLabel = li.parentElement.querySelector(`[data-step-indicator="${prev}"]`);
+      const originalText = li.textContent;
+      li.textContent = "Complete previous steps first";
+      setTimeout(() => { li.textContent = originalText; }, 1800);
     }
   });
 });
