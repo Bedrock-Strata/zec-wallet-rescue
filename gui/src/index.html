@@ -93,27 +93,32 @@
                 <option value="mainnet" selected>Mainnet</option>
                 <option value="testnet">Testnet</option>
               </select>
+              <small>Use Mainnet unless you were testing with play money (testnet).</small>
             </label>
             <label class="field">
-              <span>Birthday height</span>
+              <span>Wallet birthday</span>
               <input id="birthday-height" type="number" min="0" value="419200" />
+              <small>The block number when your wallet was created. Earlier = slower scan. Not sure? Use the date picker below — ZECK will estimate it for you.</small>
             </label>
             <label class="field">
-              <span>Date helper</span>
+              <span>Approximate wallet creation date</span>
               <input id="birthday-date" type="date" />
+              <small>Pick roughly when you first created your ZecWallet Lite, then click "Estimate birthday from date" below.</small>
             </label>
             <label class="field">
-              <span>Accounts to scan</span>
+              <span>Number of accounts to scan</span>
               <input id="accounts-range" type="range" min="1" max="500" value="20" />
               <strong id="accounts-range-value">20</strong>
+              <small>Most users only ever had 1 account. Leave at 20 to be safe.</small>
             </label>
             <label class="checkline field">
               <input id="auto-gap-limit" type="checkbox" checked />
-              <span>Use auto gap-limit mode</span>
+              <span>Stop automatically when no more funds are found</span>
             </label>
             <label class="field">
-              <span>Gap limit</span>
+              <span>How many empty accounts to check before stopping</span>
               <input id="gap-limit" type="number" min="1" max="50" value="20" />
+              <small>ZECK will stop scanning after this many accounts in a row show no funds. 20 is the recommended value.</small>
             </label>
             <label class="field">
               <span>Server preset</span>
@@ -123,31 +128,36 @@
                 <option value="testnet">Testnet public server</option>
                 <option value="custom">Keep custom value</option>
               </select>
+              <small>Leave on "Recommended" unless you have your own server.</small>
             </label>
             <label class="field span-two">
-              <span>lightwalletd server</span>
+              <span>Zcash node address (lightwalletd)</span>
               <input
                 id="lightwalletd-url"
                 type="text"
                 value="https://mainnet.lightwalletd.com:9067"
               />
-              <small>Comma-separated URLs are tried in order for fallback.</small>
+              <small>The server ZECK connects to for blockchain data. Auto-filled by the preset above. You can add backup servers separated by commas.</small>
             </label>
             <label class="field span-two">
-              <span>Recovery workspace directory</span>
+              <span>Where to save scan data on this computer</span>
               <input id="data-dir" type="text" value="/tmp/zeck_data" />
+              <small>ZECK saves its progress here so a scan can be resumed if interrupted. Change this to a permanent folder if you want to keep the data after a reboot.</small>
             </label>
             <label class="field span-two">
-              <span>Destination Unified Address</span>
+              <span>Destination address — where to send your recovered ZEC</span>
               <input id="destination-input" type="text" placeholder="u1..." />
+              <small>Must be a Unified Address starting with "u1" from your new wallet (e.g. Zashi or Ywallet). Transparent (t1…) and Sapling (zs…) addresses are not accepted.</small>
             </label>
             <label class="field span-two">
               <span>Recovery memo (optional)</span>
               <input id="sweep-memo" type="text" placeholder="ZECK recovery" />
+              <small>A short note attached to the recovery transaction. Visible only to the sender and recipient.</small>
             </label>
             <label class="field">
-              <span>Max estimated fee in ZEC (optional)</span>
+              <span>Max transaction fee in ZEC (optional)</span>
               <input id="max-fee-zec" type="text" inputmode="decimal" placeholder="0.0002" />
+              <small>Leave blank to use the standard fee (~0.0002 ZEC). Only change this if you know what you're doing.</small>
             </label>
           </div>
           <div class="inline-actions">
