@@ -108,7 +108,7 @@ pub fn build_probe(endpoint: String, info: &LightdInfo) -> LightwalletdProbe {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_lightwalletd_endpoints, prioritized_lightwalletd_endpoints};
+    use super::{describe_lightwalletd_endpoints, parse_lightwalletd_endpoints, prioritized_lightwalletd_endpoints};
 
     #[test]
     fn parse_endpoints_splits_and_deduplicates() {
@@ -134,5 +134,47 @@ mod tests {
 
         assert_eq!(endpoints[0], "https://two.test:9067");
         assert_eq!(endpoints[1], "https://one.test:9067");
+    }
+
+    #[test]
+    fn describe_empty_returns_sentinel() {
+        assert_eq!(describe_lightwalletd_endpoints(""), "no configured endpoints");
+    }
+
+    #[test]
+    fn describe_single_endpoint_returns_it_verbatim() {
+        assert_eq!(
+            describe_lightwalletd_endpoints("https://zec.rocks:443"),
+            "https://zec.rocks:443"
+        );
+    }
+
+    #[test]
+    fn describe_multiple_endpoints_includes_count() {
+        let desc = describe_lightwalletd_endpoints(
+            "https://one.test:9067,https://two.test:9067,https://three.test:9067",
+        );
+        assert!(desc.starts_with("3 endpoints"), "got: {desc}");
+        assert!(desc.contains("https://one.test:9067"));
+    }
+
+    #[test]
+    fn preferred_endpoint_not_in_list_is_prepended() {
+        let endpoints = prioritized_lightwalletd_endpoints(
+            "https://one.test:9067",
+            Some("https://preferred.test:9067"),
+        );
+        assert_eq!(endpoints[0], "https://preferred.test:9067");
+        assert_eq!(endpoints[1], "https://one.test:9067");
+    }
+
+    #[test]
+    fn empty_preferred_is_ignored() {
+        let endpoints = prioritized_lightwalletd_endpoints(
+            "https://one.test:9067,https://two.test:9067",
+            Some("  "),
+        );
+        assert_eq!(endpoints[0], "https://one.test:9067");
+        assert_eq!(endpoints.len(), 2);
     }
 }
