@@ -132,7 +132,7 @@ seedVisibility.addEventListener("change", () => {
   seedInput.classList.toggle("masked", !seedVisibility.checked);
 });
 
-$("seed-validate").addEventListener("click", async () => {
+async function validateSeed() {
   const words = seedInput.value.trim().toLowerCase().split(/\s+/);
   setStatus("seed-status", "Validating…", "");
   seedNextBtn.disabled = true;
@@ -143,6 +143,11 @@ $("seed-validate").addEventListener("click", async () => {
   } catch (err) {
     setStatus("seed-status", `✗ ${err}`, "error");
   }
+}
+
+$("seed-validate").addEventListener("click", validateSeed);
+seedInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); validateSeed(); }
 });
 
 // ─── Step 3: Configuration ────────────────────────────────────────────────────
@@ -167,6 +172,13 @@ $("server-preset").addEventListener("change", () => {
 
 $("accounts-range").addEventListener("input", () => {
   $("accounts-range-value").textContent = $("accounts-range").value;
+});
+
+$("sweep-memo").addEventListener("input", () => {
+  const bytes = new TextEncoder().encode($("sweep-memo").value).length;
+  const counter = $("memo-byte-count");
+  counter.textContent = `${bytes} / 512 bytes`;
+  counter.style.color = bytes > 512 ? "var(--color-error, #c0392b)" : "";
 });
 
 $("auto-gap-limit").addEventListener("change", () => {
@@ -215,7 +227,7 @@ $("birthday-estimate").addEventListener("click", async () => {
   }
 });
 
-$("destination-validate").addEventListener("click", async () => {
+async function validateDestination() {
   const address = $("destination-input").value.trim();
   if (!address) {
     setStatus("config-status", "Enter a destination address first.", "error");
@@ -234,6 +246,11 @@ $("destination-validate").addEventListener("click", async () => {
   } catch (err) {
     setStatus("config-status", `✗ ${err}`, "error");
   }
+}
+
+$("destination-validate").addEventListener("click", validateDestination);
+$("destination-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); validateDestination(); }
 });
 
 $("start-scan").addEventListener("click", async () => {
@@ -311,13 +328,21 @@ async function startProgressListeners() {
   // handles via .then() callbacks, a fast scan-complete event could fire and
   // run cleanupListeners() before the handles were assigned, leaking the
   // subscriptions across scans.
+  $("scan-discoveries").innerHTML = "";
+
   const [unlistenProgress, unlistenComplete, unlistenDiscovered] = await Promise.all([
     listen("scan-progress", (event) => updateScanUI(event.payload)),
     listen("scan-complete", (event) => {
       updateScanUI(event.payload);
       cleanupListeners();
     }),
-    listen("account-discovered", () => {}),
+    listen("account-discovered", (event) => {
+      const acc = event.payload;
+      const div = document.createElement("div");
+      div.className = "discovery-toast";
+      div.textContent = `Account ${acc.account_index} — ${fmt(acc.total_zatoshis)} found`;
+      $("scan-discoveries").appendChild(div);
+    }),
   ]);
   state.unlistenProgress = unlistenProgress;
   state.unlistenComplete = unlistenComplete;
@@ -456,13 +481,23 @@ function renderSweepProposal(proposal) {
     tr.innerHTML = `
       <td>${tx.source_account}</td>
       <td>${kindLabel}</td>
-      <td title="${escapeHtml(dest)}">${escapeHtml(shortDest)}</td>
+      <td title="${escapeHtml(dest)}" style="cursor:pointer" data-copy="${escapeHtml(dest)}">${escapeHtml(shortDest)} <small>📋</small></td>
       <td>${fmt(tx.gross_zatoshis)}</td>
       <td>${fmt(tx.fee_zatoshis)}</td>
       <td>${fmt(tx.net_zatoshis)}</td>
       <td>${escapeHtml(tx.memo ?? "—")}</td>
     `;
     tbody.appendChild(tr);
+  });
+
+  $("sweep-rows").addEventListener("click", (e) => {
+    const cell = e.target.closest("[data-copy]");
+    if (!cell) return;
+    navigator.clipboard.writeText(cell.dataset.copy).then(() => {
+      const orig = cell.innerHTML;
+      cell.innerHTML = "Copied!";
+      setTimeout(() => { cell.innerHTML = orig; }, 1200);
+    });
   });
 
   $("sweep-summary").textContent =
