@@ -138,8 +138,9 @@ async fn main() -> Result<()> {
         eprintln!(
             "Note: this scan can take hours for old wallets. Progress is saved \
              under {data_dir} after each batch — interrupt with Ctrl-C any time \
-             and re-run with the same flags (network, birthday, gap-limit) to \
-             resume from the last persisted block. Changing any of those flags \
+             and re-run with the same --data-dir, --network, --birthday, and \
+             account-scan mode (the same --gap-limit, or the same --num-accounts) \
+             to resume from the last persisted block. Changing any of those \
              intentionally starts a fresh workspace and re-scans from the new \
              birthday.",
             data_dir = cli.data_dir.display(),

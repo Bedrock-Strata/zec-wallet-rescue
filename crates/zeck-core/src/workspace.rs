@@ -21,12 +21,14 @@ use crate::{
 /// On-disk location of a wallet workspace for one (network, seed, birthday,
 /// gap-strategy) tuple.
 ///
-/// Resume invariant: identical scan args MUST resolve to the same `root`
-/// across runs, and the `WalletDb` and `BlockDb` initializers MUST be
-/// idempotent against an existing on-disk workspace. This is what makes a
-/// scan safely interruptible — quitting mid-scan and re-running with the
-/// same flags picks up where the previous run left off (specifically, from
-/// `WalletSummary::fully_scanned_height`).
+/// Resume keying: identical scan args MUST resolve to the same `root`
+/// across runs. This module's tests pin that contract. The downstream
+/// behavior — that re-running ZECK with the same args actually resumes
+/// from `WalletSummary::fully_scanned_height` — depends on `WalletDb`
+/// and `BlockDb` initializers being idempotent against existing on-disk
+/// workspaces, which is an upstream contract from `zcash_client_sqlite`.
+/// That contract is not pinned here; treat it as a thing to verify
+/// during dependency bumps.
 ///
 /// Callers that change birthday or gap-limit between runs intentionally land
 /// on a fresh sub-workspace, so old state is preserved rather than corrupted
@@ -315,10 +317,35 @@ mod tests {
     }
 
     #[test]
+    fn print_fingerprint_for_snapshot() {
+        // Prints the expected SeedFingerprint string for the fixed test
+        // SEED so the snapshot test below can pin it. Run with
+        // `cargo test workspace::tests::print_fingerprint_for_snapshot
+        // -- --nocapture` to update the SEED_FINGERPRINT constant when
+        // the upstream algorithm or display format changes intentionally.
+        let cfg = config(SEED, 3_280_000, None, 20, ZeckNetwork::Mainnet);
+        let ws = RecoveryWorkspace::from_runtime(&cfg).unwrap();
+        let suffix = ws
+            .root()
+            .strip_prefix(&cfg.data_dir)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let parts: Vec<&str> = suffix.split('/').collect();
+        eprintln!("fingerprint = {}", parts[1]);
+    }
+
+    #[test]
     fn workspace_path_does_not_change_across_releases() {
         // Snapshot the keying so an accidental change to the path layout
         // shows up as a test failure rather than a silently-orphaned
-        // workspace on every user's disk.
+        // workspace on every user's disk. The fingerprint segment is
+        // pinned to the *exact* string, not just the HRP, so a change
+        // in the upstream zip32::SeedFingerprint algorithm or display
+        // format will flip this test (which would otherwise silently
+        // orphan every existing user's workspace dir).
+        const EXPECTED_FINGERPRINT_FOR_TEST_SEED: &str =
+            "zip32seedfp1uc59thq5rxtjutv06dymwsx7dfna3nm0a2h7jr8j7dazx3zkdnxqqgyu24";
         let cfg = config(SEED, 3_280_000, None, 20, ZeckNetwork::Mainnet);
         let ws = RecoveryWorkspace::from_runtime(&cfg).unwrap();
         let suffix = ws
@@ -331,7 +358,12 @@ mod tests {
         let parts: Vec<&str> = suffix.split('/').collect();
         assert_eq!(parts.len(), 4, "unexpected workspace path layout: {suffix}");
         assert_eq!(parts[0], "mainnet");
-        assert!(parts[1].starts_with("zip32seedfp"), "seed fingerprint prefix expected, got {}", parts[1]);
+        assert_eq!(
+            parts[1], EXPECTED_FINGERPRINT_FOR_TEST_SEED,
+            "seed fingerprint changed for the fixed test seed — if intentional, \
+             update EXPECTED_FINGERPRINT_FOR_TEST_SEED, but be aware this means \
+             every existing user's workspace dir is now orphaned"
+        );
         assert_eq!(parts[2], "birthday-3280000");
         assert_eq!(parts[3], "auto-gap-20");
     }
