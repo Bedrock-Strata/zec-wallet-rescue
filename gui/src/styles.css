@@ -60,6 +60,57 @@ table {
   padding: 28px;
 }
 
+.sidebar-top {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  justify-content: space-between;
+  gap: 24px;
+  /* So the credit footer below has breathing room from the step list. */
+  margin-bottom: 24px;
+}
+
+.sidebar-credit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  /* Subtle: low contrast, small, no underline noise. */
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  opacity: 0.65;
+  transition: opacity 0.18s ease;
+}
+
+.sidebar-credit:hover {
+  opacity: 0.95;
+}
+
+.sidebar-credit-prefix {
+  /* Visually paired with the wordmark — match the caption's vertical center. */
+  line-height: 1;
+}
+
+.sidebar-credit-mark {
+  /* The SVG ships at viewBox="684 425 90 34" — width:height ≈ 90:34.
+     Render via CSS mask so background-color (= currentColor) tints the
+     wordmark to match the surrounding muted text instead of using the
+     SVG's hardcoded fill. <img src> can't inherit text color. */
+  display: inline-block;
+  height: 0.95rem;
+  width: calc(0.95rem * (90 / 34));
+  background-color: currentColor;
+  mask-image: url("./assets/sovright-caption.svg");
+  -webkit-mask-image: url("./assets/sovright-caption.svg");
+  mask-repeat: no-repeat;
+  -webkit-mask-repeat: no-repeat;
+  mask-size: contain;
+  -webkit-mask-size: contain;
+  mask-position: center;
+  -webkit-mask-position: center;
+}
+
 .main-panel {
   position: relative;
   overflow: hidden;
