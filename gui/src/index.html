@@ -9,22 +9,29 @@
   <body>
     <div class="app-shell">
       <aside class="sidebar">
-        <div>
-          <p class="eyebrow">ZecWallet Lite Recovery</p>
-          <h1>ZECK</h1>
-          <p class="sidebar-copy">
-            Recover your Zcash from ZecWallet Lite and send it safely to your new wallet.
-          </p>
+        <div class="sidebar-top">
+          <div>
+            <p class="eyebrow">ZecWallet Lite Recovery</p>
+            <h1>ZECK</h1>
+            <p class="sidebar-copy">
+              Recover your Zcash from ZecWallet Lite and send it safely to your new wallet.
+            </p>
+          </div>
+
+          <ol class="step-list">
+            <li data-step-indicator="welcome">Welcome</li>
+            <li data-step-indicator="seed">Seed Entry</li>
+            <li data-step-indicator="config">Configure</li>
+            <li data-step-indicator="scan">Scan</li>
+            <li data-step-indicator="sweep">Sweep</li>
+            <li data-step-indicator="complete">Complete</li>
+          </ol>
         </div>
 
-        <ol class="step-list">
-          <li data-step-indicator="welcome">Welcome</li>
-          <li data-step-indicator="seed">Seed Entry</li>
-          <li data-step-indicator="config">Configure</li>
-          <li data-step-indicator="scan">Scan</li>
-          <li data-step-indicator="sweep">Sweep</li>
-          <li data-step-indicator="complete">Complete</li>
-        </ol>
+        <p class="sidebar-credit" aria-label="Built by Sovright">
+          <span class="sidebar-credit-prefix">Built by</span>
+          <span class="sidebar-credit-mark" role="img" aria-label="Sovright"></span>
+        </p>
       </aside>
 
       <main class="main-panel">
