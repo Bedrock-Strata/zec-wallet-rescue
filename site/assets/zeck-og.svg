@@ -24,7 +24,10 @@
     <text x="64" y="32" font-family="Avenir Next, Helvetica, Arial, sans-serif" font-size="24" font-weight="800" fill="#17221d">ZECK</text>
   </g>
 
-  <image href="./sovright-logo-caption.svg" x="914" y="92" width="150" height="57" opacity="0.58"/>
+  <g opacity="0.82">
+    <rect x="836" y="82" width="240" height="68" rx="16" fill="#fffdf8" stroke="#d8d1c4"/>
+    <image href="./sovright-logo-caption.svg" x="872" y="96" width="168" height="64"/>
+  </g>
 
   <g transform="translate(100 194)">
     <text font-family="Georgia, Times New Roman, serif" font-size="68" font-weight="700" fill="#17221d">ZECK Rescue Wallet</text>
