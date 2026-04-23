@@ -60,6 +60,57 @@ table {
   padding: 28px;
 }
 
+.sidebar-top {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  justify-content: space-between;
+  gap: 24px;
+  /* So the credit footer below has breathing room from the step list. */
+  margin-bottom: 24px;
+}
+
+.sidebar-credit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  /* Subtle: low contrast, small, no underline noise. */
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  opacity: 0.65;
+  transition: opacity 0.18s ease;
+}
+
+.sidebar-credit:hover {
+  opacity: 0.95;
+}
+
+.sidebar-credit-prefix {
+  /* Visually paired with the wordmark — match the caption's vertical center. */
+  line-height: 1;
+}
+
+.sidebar-credit-mark {
+  /* The SVG ships at viewBox="684 425 90 34" — width:height ≈ 90:34.
+     Render via CSS mask so background-color (= currentColor) tints the
+     wordmark to match the surrounding muted text instead of using the
+     SVG's hardcoded fill. <img src> can't inherit text color. */
+  display: inline-block;
+  height: 0.95rem;
+  width: calc(0.95rem * (90 / 34));
+  background-color: currentColor;
+  mask-image: url("./assets/sovright-caption.svg");
+  -webkit-mask-image: url("./assets/sovright-caption.svg");
+  mask-repeat: no-repeat;
+  -webkit-mask-repeat: no-repeat;
+  mask-size: contain;
+  -webkit-mask-size: contain;
+  mask-position: center;
+  -webkit-mask-position: center;
+}
+
 .main-panel {
   position: relative;
   overflow: hidden;
@@ -148,6 +199,17 @@ h3 {
 .step-list li.complete {
   border-color: rgba(31, 107, 86, 0.16);
   color: var(--accent);
+}
+
+.step-list li.reachable:hover {
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(31, 107, 86, 0.18);
+  cursor: pointer;
+}
+
+.step-list li:not(.reachable) {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .screen {
@@ -332,6 +394,11 @@ button:disabled {
   background: rgba(255, 245, 228, 0.96);
 }
 
+.banner.info {
+  color: #1d3a4f;
+  background: rgba(225, 240, 250, 0.96);
+}
+
 .progress-shell {
   width: 100%;
   height: 12px;
@@ -397,6 +464,17 @@ pre {
   margin: 10px 0 4px;
   padding-left: 18px;
   color: var(--muted);
+}
+
+.discovery-toast {
+  padding: 8px 12px;
+  margin: 6px 0;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 6px;
+  font-size: 0.875rem;
+  color: var(--ink);
+  animation: rise 240ms ease;
 }
 
 @keyframes rise {

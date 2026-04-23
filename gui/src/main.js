@@ -1,659 +1,846 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+function invoke(...args) {
+  return window.__TAURI__.core.invoke(...args);
+}
+function listen(...args) {
+  return window.__TAURI__.event.listen(...args);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+
+// ─── State ────────────────────────────────────────────────────────────────────
 
 const state = {
-  currentStep: "welcome",
   scanHandle: null,
-  scanProgress: null,
-  destinationInfo: null,
+  lastProgress: null,
   sweepProposal: null,
-  sweepResults: [],
-  accountDiscoveries: [],
+  destination: null,
+  memo: null,
+  maxFeeZec: null,
+  unlistenProgress: null,
+  unlistenComplete: null,
+  unlistenDiscovered: null,
 };
 
-const stepOrder = ["welcome", "seed", "config", "scan", "sweep", "complete"];
-const KNOWN_SERVERS = {
-  mainnet: "https://mainnet.lightwalletd.com:9067",
-  testnet: "https://testnet.lightwalletd.com:9067",
-};
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const elements = {
-  seedInput: document.querySelector("#seed-input"),
-  seedVisibility: document.querySelector("#seed-visibility"),
-  seedStatus: document.querySelector("#seed-status"),
-  seedNext: document.querySelector("#seed-next"),
-  seedValidate: document.querySelector("#seed-validate"),
-  networkSelect: document.querySelector("#network-select"),
-  birthdayHeight: document.querySelector("#birthday-height"),
-  birthdayDate: document.querySelector("#birthday-date"),
-  accountsRange: document.querySelector("#accounts-range"),
-  accountsRangeValue: document.querySelector("#accounts-range-value"),
-  autoGapLimit: document.querySelector("#auto-gap-limit"),
-  gapLimit: document.querySelector("#gap-limit"),
-  serverPreset: document.querySelector("#server-preset"),
-  lightwalletdUrl: document.querySelector("#lightwalletd-url"),
-  dataDir: document.querySelector("#data-dir"),
-  destinationInput: document.querySelector("#destination-input"),
-  sweepMemo: document.querySelector("#sweep-memo"),
-  maxFeeZec: document.querySelector("#max-fee-zec"),
-  configStatus: document.querySelector("#config-status"),
-  startScan: document.querySelector("#start-scan"),
-  birthdayEstimate: document.querySelector("#birthday-estimate"),
-  destinationValidate: document.querySelector("#destination-validate"),
-  cancelScan: document.querySelector("#cancel-scan"),
-  reviewSweep: document.querySelector("#review-sweep"),
-  scanPhase: document.querySelector("#scan-phase"),
-  scanServer: document.querySelector("#scan-server"),
-  scanProgressText: document.querySelector("#scan-progress-text"),
-  scanEta: document.querySelector("#scan-eta"),
-  scanProgressBar: document.querySelector("#scan-progress-bar"),
-  scanMessage: document.querySelector("#scan-message"),
-  scanTotals: document.querySelector("#scan-totals"),
-  scanWorkspace: document.querySelector("#scan-workspace"),
-  scanRows: document.querySelector("#scan-rows"),
-  scanDiscoveries: document.querySelector("#scan-discoveries"),
-  sweepRows: document.querySelector("#sweep-rows"),
-  sweepSummary: document.querySelector("#sweep-summary"),
-  sweepSkipped: document.querySelector("#sweep-skipped"),
-  irreversibleCheck: document.querySelector("#irreversible-check"),
-  executeSweep: document.querySelector("#execute-sweep"),
-  completeSummary: document.querySelector("#complete-summary"),
-  completeReport: document.querySelector("#complete-report"),
-  reportPath: document.querySelector("#report-path"),
-  saveReport: document.querySelector("#save-report"),
-  saveReportStatus: document.querySelector("#save-report-status"),
-};
+const $ = (id) => document.getElementById(id);
+const fmt = (n) => (Number(n) / 1e8).toFixed(8) + " ZEC";
 
-document.querySelectorAll("[data-next]").forEach((button) => {
-  button.addEventListener("click", () => setStep(button.dataset.next));
+function phaseLabel(phase) {
+  const labels = {
+    idle: "Idle",
+    validating_seed: "Validating seed…",
+    deriving_keys: "Deriving keys…",
+    probing_lightwalletd: "Probing lightwalletd…",
+    scanning_transparent: "Scanning transparent…",
+    scanning_shielded: "Scanning shielded…",
+    complete: "Complete ✓",
+    cancelled: "Cancelled",
+    error: "Error",
+  };
+  return labels[phase] ?? phase;
+}
+
+function setStatus(id, msg, kind) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = msg;
+  el.className = "status-line" + (kind ? ` ${kind}` : "");
+}
+
+function fmtSeconds(s) {
+  if (s == null) return "—";
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return r > 0 ? `${m}m ${r}s` : `${m}m`;
+}
+
+// Friendly, deliberately imprecise ETA banding. Mirrors `format_eta_range` in
+// zeck-cli; if you change one, change both.
+function formatEtaRange(secs) {
+  if (secs == null || !Number.isFinite(secs) || secs < 0) return null;
+  if (secs < 60) return "less than a minute remaining";
+  if (secs < 5 * 60) return "less than 5 minutes remaining";
+  if (secs < 30 * 60) {
+    const mins = Math.round(secs / 60 / 5) * 5;
+    return `about ${mins} minutes remaining`;
+  }
+  if (secs < 60 * 60) return "less than an hour remaining";
+  const hours = secs / 3600;
+  if (hours < 2) return "about 1-2 hours remaining";
+  const lo = Math.floor(hours);
+  return `about ${lo}-${lo + 1} hours remaining`;
+}
+
+// Map a block height to its approximate calendar year on mainnet so users can
+// feel the scan moving through time. Mirrors `era_hint` in zeck-cli.
+function eraHint(height) {
+  if (!height) return null;
+  const SAPLING_HEIGHT = 419_200;
+  const SAPLING_YEAR = 2018;
+  const SECONDS_PER_BLOCK = 82;
+  if (height < SAPLING_HEIGHT) return "pre-Sapling era";
+  const elapsedSecs = (height - SAPLING_HEIGHT) * SECONDS_PER_BLOCK;
+  const elapsedYears = elapsedSecs / (365.25 * 86400);
+  return String(SAPLING_YEAR + Math.floor(elapsedYears + 0.18));
+}
+
+// Sliding-window ETA tracker — see `EtaTracker` in zeck-cli.
+const eta = (() => {
+  const WINDOW_MS = 45_000;
+  const WARMUP_MS = 15_000;
+  let samples = [];
+  let lastTotal = 0;
+  let startedAt = null;
+
+  return {
+    reset() {
+      samples = [];
+      lastTotal = 0;
+      startedAt = performance.now();
+    },
+    observe(scanned, total) {
+      if (!total) return;
+      lastTotal = total;
+      const now = performance.now();
+      samples.push([now, scanned]);
+      const cutoff = now - WINDOW_MS;
+      while (samples.length > 2 && samples[0][0] < cutoff) samples.shift();
+    },
+    estimate() {
+      if (startedAt == null || samples.length < 2 || !lastTotal) return { kind: "warmup" };
+      const elapsed = performance.now() - startedAt;
+      const [tFirst, blocksFirst] = samples[0];
+      const [tLast, blocksLast] = samples[samples.length - 1];
+      const remaining = lastTotal - blocksLast;
+      if (remaining <= 0) return { kind: "done" };
+      const windowMs = tLast - tFirst;
+      const scannedInWindow = blocksLast - blocksFirst;
+      if (elapsed < WARMUP_MS || windowMs < 5_000 || scannedInWindow < 50) {
+        return { kind: "warmup" };
+      }
+      const rate = scannedInWindow / (windowMs / 1000);
+      if (rate <= 0) return { kind: "warmup" };
+      const secs = Math.round(remaining / rate);
+      return { kind: "range", text: formatEtaRange(secs) };
+    },
+  };
+})();
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// ─── Navigation ───────────────────────────────────────────────────────────────
+
+const steps = ["welcome", "seed", "config", "scan", "sweep", "complete"];
+let furthestStep = 0; // tracks how far the user has reached
+
+function goTo(step) {
+  const stepIdx = steps.indexOf(step);
+  if (stepIdx > furthestStep) furthestStep = stepIdx;
+
+  document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
+  document.querySelectorAll(".step-list li").forEach((li) => {
+    const s = li.dataset.stepIndicator;
+    const liIdx = steps.indexOf(s);
+    li.classList.remove("active", "complete", "reachable");
+    if (liIdx < stepIdx) li.classList.add("complete");
+    if (liIdx === stepIdx) li.classList.add("active");
+    if (liIdx <= furthestStep) li.classList.add("reachable");
+  });
+  const screen = document.querySelector(`.screen[data-step="${step}"]`);
+  if (screen) screen.classList.add("active");
+}
+
+// Make sidebar steps clickable — only allow jumping to already-reached steps
+document.querySelectorAll(".step-list li").forEach((li) => {
+  li.style.cursor = "pointer";
+  li.addEventListener("click", () => {
+    const target = li.dataset.stepIndicator;
+    const targetIdx = steps.indexOf(target);
+    if (targetIdx <= furthestStep) {
+      if (target === "config") {
+        $("start-scan").disabled = false;
+        setStatus("config-status", "", "");
+      }
+      goTo(target);
+    } else {
+      // Show a brief tooltip on the step that can't be reached yet
+      const prev = steps[targetIdx - 1];
+      const prevLabel = li.parentElement.querySelector(`[data-step-indicator="${prev}"]`);
+      const originalText = li.textContent;
+      li.textContent = "Complete previous steps first";
+      setTimeout(() => { li.textContent = originalText; }, 1800);
+    }
+  });
 });
 
-document.querySelectorAll("[data-prev]").forEach((button) => {
-  button.addEventListener("click", () => setStep(button.dataset.prev));
+document.querySelectorAll("[data-next]").forEach((btn) => {
+  btn.addEventListener("click", () => goTo(btn.dataset.next));
 });
 
-elements.accountsRange.addEventListener("input", () => {
-  elements.accountsRangeValue.textContent = elements.accountsRange.value;
-});
-elements.autoGapLimit.addEventListener("change", syncAccountMode);
-elements.gapLimit.addEventListener("input", syncAccountMode);
-elements.networkSelect.addEventListener("change", () => {
-  applyServerPreset();
-  syncReportPath();
-});
-elements.serverPreset.addEventListener("change", applyServerPreset);
-elements.dataDir.addEventListener("input", syncReportPath);
-
-elements.seedVisibility.addEventListener("change", () => {
-  elements.seedInput.classList.toggle("masked", !elements.seedVisibility.checked);
+document.querySelectorAll("[data-prev]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    if (btn.dataset.prev === "config") {
+      $("start-scan").disabled = false;
+      setStatus("config-status", "", "");
+    }
+    goTo(btn.dataset.prev);
+  });
 });
 
-elements.seedValidate.addEventListener("click", validateSeed);
-elements.destinationValidate.addEventListener("click", validateDestination);
-elements.birthdayEstimate.addEventListener("click", estimateBirthday);
-elements.startScan.addEventListener("click", startScan);
-elements.cancelScan.addEventListener("click", cancelScan);
-elements.reviewSweep.addEventListener("click", reviewSweep);
-elements.irreversibleCheck.addEventListener("change", () => {
-  elements.executeSweep.disabled = !elements.irreversibleCheck.checked;
-});
-elements.executeSweep.addEventListener("click", executeSweep);
-elements.saveReport.addEventListener("click", saveRecoveryReport);
-document.querySelector("#restart-flow").addEventListener("click", resetFlow);
+// ─── Step 2: Seed Entry ───────────────────────────────────────────────────────
 
-listen("scan-progress", (event) => {
-  state.scanProgress = event.payload;
-  renderScanProgress();
-});
+const seedInput = $("seed-input");
+const seedVisibility = $("seed-visibility");
+const seedNextBtn = $("seed-next");
 
-listen("account-discovered", (event) => {
-  const account = event.payload;
-  state.accountDiscoveries = [
-    account,
-    ...state.accountDiscoveries.filter((entry) => entry.account_index !== account.account_index),
-  ].slice(0, 12);
-  renderDiscoveries();
-});
-
-listen("scan-complete", (event) => {
-  state.scanProgress = event.payload;
-  renderScanProgress();
-});
-
-listen("sweep-tx-broadcast", (event) => {
-  mergeSweepResult(event.payload);
-  renderCompleteReport();
-});
-
-listen("sweep-tx-confirmed", (event) => {
-  mergeSweepResult(event.payload);
-  renderCompleteReport();
+seedVisibility.addEventListener("change", () => {
+  seedInput.classList.toggle("masked", !seedVisibility.checked);
 });
 
 async function validateSeed() {
-  const words = splitSeedWords();
-  if (words.length !== 24) {
-    elements.seedStatus.textContent = `Expected 24 words, found ${words.length}.`;
-    elements.seedStatus.className = "status-line error";
-    elements.seedNext.disabled = true;
-    return;
-  }
-
+  const words = seedInput.value.trim().toLowerCase().split(/\s+/);
+  setStatus("seed-status", "Validating…", "");
+  seedNextBtn.disabled = true;
   try {
     await invoke("validate_seed", { words });
-    elements.seedStatus.textContent = "Seed phrase checksum looks valid.";
-    elements.seedStatus.className = "status-line success";
-    elements.seedNext.disabled = false;
-  } catch (error) {
-    elements.seedStatus.textContent = String(error);
-    elements.seedStatus.className = "status-line error";
-    elements.seedNext.disabled = true;
+    setStatus("seed-status", "✓ Seed phrase is valid.", "success");
+    seedNextBtn.disabled = false;
+  } catch (err) {
+    setStatus("seed-status", `✗ ${err}`, "error");
   }
 }
+
+$("seed-validate").addEventListener("click", validateSeed);
+seedInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); validateSeed(); }
+});
+
+// ─── Step 3: Configuration ────────────────────────────────────────────────────
+
+const SERVER_PRESETS = {
+  mainnet: "https://zec.rocks:443,https://na.zec.rocks:443",
+  testnet: "https://lightwalletd.testnet.electriccoin.co:9067",
+};
+
+$("network-select").addEventListener("change", () => {
+  if ($("server-preset").value === "recommended") {
+    $("lightwalletd-url").value = SERVER_PRESETS[$("network-select").value] ?? SERVER_PRESETS.mainnet;
+  }
+});
+
+$("server-preset").addEventListener("change", () => {
+  const preset = $("server-preset").value;
+  if (preset === "custom") return;
+  const key = preset === "recommended" ? $("network-select").value : preset;
+  $("lightwalletd-url").value = SERVER_PRESETS[key] ?? SERVER_PRESETS.mainnet;
+});
+
+$("accounts-range").addEventListener("input", () => {
+  $("accounts-range-value").textContent = $("accounts-range").value;
+});
+
+$("sweep-memo").addEventListener("input", () => {
+  const bytes = new TextEncoder().encode($("sweep-memo").value).length;
+  const counter = $("memo-byte-count");
+  counter.textContent = `${bytes} / 512 bytes`;
+  counter.style.color = bytes > 512 ? "var(--color-error, #c0392b)" : "";
+});
+
+$("auto-gap-limit").addEventListener("change", () => {
+  const auto = $("auto-gap-limit").checked;
+  $("gap-limit-row").style.display = auto ? "none" : "block";
+  $("accounts-range").disabled = !auto;
+  $("accounts-range-value").style.opacity = auto ? "0.4" : "1";
+});
+
+// Approximate mainnet chain tip and scan rate for time estimates
+const APPROX_CHAIN_TIP = 2_730_000;
+const BLOCKS_PER_MINUTE = 38_000;
+
+function updateScanEstimate() {
+  const birthday = parseInt($("birthday-height").value, 10) || 419200;
+  const blocks = Math.max(0, APPROX_CHAIN_TIP - birthday);
+  const minutes = Math.round(blocks / BLOCKS_PER_MINUTE);
+  const el = $("birthday-scan-estimate");
+  if (minutes <= 1) {
+    el.textContent = "Estimated scan time: under 1 minute.";
+  } else if (minutes < 60) {
+    el.textContent = `Estimated scan time: ~${minutes} minutes.`;
+  } else {
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    el.textContent = `Estimated scan time: ~${hours}h ${mins}m.`;
+  }
+}
+
+$("birthday-height").addEventListener("input", updateScanEstimate);
+updateScanEstimate();
+
+$("birthday-autodetect").addEventListener("click", async () => {
+  const seedVal = seedInput.value.trim();
+  if (!seedVal) {
+    setStatus("config-status", "Enter your seed phrase on step 2 first.", "error");
+    return;
+  }
+  $("birthday-autodetect").disabled = true;
+  $("birthday-probe-status").textContent = "Starting detection…";
+  setStatus("config-status", "", "");
+
+  const unlistenProbe = await listen("birthday-probe-progress", (event) => {
+    $("birthday-probe-status").textContent = event.payload;
+  });
+
+  try {
+    const result = await invoke("detect_birthday", {
+      seed: seedVal.toLowerCase(),
+      lightwalletdUrl: $("lightwalletd-url").value.trim(),
+      network: $("network-select").value,
+    });
+    $("birthday-height").value = result.birthday;
+    updateScanEstimate();
+    $("birthday-probe-status").textContent = "";
+    setStatus("config-status", `✓ ${result.message}`, "success");
+  } catch (err) {
+    $("birthday-probe-status").textContent = "";
+    setStatus("config-status", `✗ Birthday detection failed: ${err}`, "error");
+  } finally {
+    $("birthday-autodetect").disabled = false;
+    unlistenProbe();
+  }
+});
+
+$("birthday-estimate").addEventListener("click", async () => {
+  const dateVal = $("birthday-date").value;
+  if (!dateVal) {
+    setStatus("config-status", "Pick a date first.", "error");
+    return;
+  }
+  try {
+    const height = await invoke("estimate_birthday_from_date", { date: dateVal });
+    $("birthday-height").value = height;
+    updateScanEstimate();
+    setStatus("config-status", `Birthday estimated: block ${Number(height).toLocaleString()}`, "success");
+  } catch (err) {
+    setStatus("config-status", String(err), "error");
+  }
+});
 
 async function validateDestination() {
-  if (!elements.destinationInput.value.trim()) {
-    elements.configStatus.textContent = "Enter a destination Unified Address first.";
-    elements.configStatus.className = "status-line error";
+  const address = $("destination-input").value.trim();
+  if (!address) {
+    setStatus("config-status", "Enter a destination address first.", "error");
     return;
   }
-
   try {
-    state.destinationInfo = await invoke("validate_address", {
-      address: elements.destinationInput.value.trim(),
-    });
-    elements.configStatus.textContent = `Destination accepted. Orchard=${state.destinationInfo.has_orchard}, Sapling=${state.destinationInfo.has_sapling}.`;
-    elements.configStatus.className = "status-line success";
-  } catch (error) {
-    elements.configStatus.textContent = String(error);
-    elements.configStatus.className = "status-line error";
-  }
-}
-
-async function estimateBirthday() {
-  if (!elements.birthdayDate.value) {
-    elements.configStatus.textContent = "Choose a date first.";
-    elements.configStatus.className = "status-line error";
-    return;
-  }
-
-  try {
-    const height = await invoke("estimate_birthday_from_date", {
-      date: elements.birthdayDate.value,
-    });
-    elements.birthdayHeight.value = String(height);
-    elements.configStatus.textContent = `Estimated birthday height: ${height}`;
-    elements.configStatus.className = "status-line success";
-  } catch (error) {
-    elements.configStatus.textContent = String(error);
-    elements.configStatus.className = "status-line error";
-  }
-}
-
-async function startScan() {
-  const words = splitSeedWords();
-  if (words.length !== 24) {
-    elements.configStatus.textContent = "Validate the 24-word seed phrase first.";
-    elements.configStatus.className = "status-line error";
-    setStep("seed");
-    return;
-  }
-
-  setStep("scan");
-  elements.reviewSweep.disabled = true;
-  state.scanProgress = null;
-  state.sweepProposal = null;
-  state.sweepResults = [];
-  state.accountDiscoveries = [];
-  state.scanHandle = null;
-  renderScanProgress();
-  renderDiscoveries();
-  syncReportPath();
-
-  try {
-    state.scanHandle = await invoke("start_scan", {
-      config: {
-        seed: normalizedSeedPhrase(),
-        birthday: Number(elements.birthdayHeight.value || 419200),
-        num_accounts: elements.autoGapLimit.checked ? null : Number(elements.accountsRange.value),
-        gap_limit: Number(elements.gapLimit.value || 20),
-        lightwalletd_url: elements.lightwalletdUrl.value.trim(),
-        data_dir: elements.dataDir.value.trim() || "./zeck_data",
-        network: elements.networkSelect.value,
-      },
-    });
-    elements.seedInput.value = "";
-    elements.seedStatus.textContent = "";
-  } catch (error) {
-    elements.scanMessage.textContent = String(error);
-    elements.scanMessage.className = "status-line error";
-  }
-}
-
-async function cancelScan() {
-  if (!state.scanHandle) {
-    return;
-  }
-
-  await invoke("cancel_scan", { handle: state.scanHandle });
-}
-
-async function reviewSweep() {
-  if (!state.scanHandle || !isSweepReviewAvailable(state.scanProgress)) {
-    return;
-  }
-
-  try {
-    state.sweepProposal = await invoke("propose_sweep", {
-      handle: state.scanHandle,
-      destination: elements.destinationInput.value.trim(),
-      memo: elements.sweepMemo.value.trim() || null,
-      maxFeeZec: elements.maxFeeZec.value.trim() || null,
-    });
-    renderSweepProposal();
-    setStep("sweep");
-  } catch (error) {
-    elements.scanMessage.textContent = String(error);
-    elements.scanMessage.className = "status-line error";
-  }
-}
-
-async function executeSweep() {
-  if (!state.scanHandle) {
-    return;
-  }
-
-  try {
-    state.sweepResults = await invoke("execute_sweep", {
-      handle: state.scanHandle,
-      destination: elements.destinationInput.value.trim(),
-      memo: elements.sweepMemo.value.trim() || null,
-      maxFeeZec: elements.maxFeeZec.value.trim() || null,
-    });
-    elements.completeSummary.textContent = "Sweep request finished.";
-    renderCompleteReport();
-    syncReportPath();
-    setStep("complete");
-  } catch (error) {
-    state.sweepResults = [];
-    elements.completeSummary.textContent = "Sweep execution ended with an error.";
-    elements.completeReport.innerHTML = `<pre>${String(error)}</pre>`;
-    syncReportPath();
-    setStep("complete");
-  }
-}
-
-async function saveRecoveryReport() {
-  try {
-    const savedPath = await invoke("save_recovery_report", {
-      path: elements.reportPath.value.trim(),
-      report: buildRecoveryReport(),
-    });
-    elements.saveReportStatus.textContent = `Saved report to ${savedPath}`;
-    elements.saveReportStatus.className = "status-line success";
-  } catch (error) {
-    elements.saveReportStatus.textContent = String(error);
-    elements.saveReportStatus.className = "status-line error";
-  }
-}
-
-function renderScanProgress() {
-  const progress = state.scanProgress;
-  if (!progress) {
-    elements.scanPhase.textContent = "Idle";
-    elements.scanServer.textContent = "Not connected";
-    elements.scanProgressText.textContent = "0 / 0";
-    elements.scanEta.textContent = "0s / —";
-    elements.scanProgressBar.style.width = "0%";
-    elements.scanMessage.textContent = "Waiting to start.";
-    elements.scanMessage.className = "status-line";
-    elements.scanTotals.textContent = "Grand total: 0.00000000 ZEC across 0 accounts.";
-    elements.scanWorkspace.textContent = "Workspace: not initialized";
-    elements.scanRows.innerHTML = "";
-    elements.reviewSweep.disabled = true;
-    return;
-  }
-
-  elements.scanPhase.textContent = progress.phase.replaceAll("_", " ");
-  elements.scanServer.textContent = progress.server
-    ? `${progress.server.vendor || "lightwalletd"} @ ${progress.server.latest_block_height || 0}`
-    : "Connecting";
-  elements.scanProgressText.textContent = `${progress.blocks_scanned} / ${progress.blocks_total}`;
-  elements.scanEta.textContent = `${formatDuration(progress.elapsed_seconds)} / ${formatDuration(progress.estimated_remaining_seconds)}`;
-  const percent =
-    progress.blocks_total > 0
-      ? Math.min(100, Math.round((progress.blocks_scanned / progress.blocks_total) * 100))
-      : 0;
-  elements.scanProgressBar.style.width = `${percent}%`;
-  elements.scanMessage.textContent =
-    (progress.summary && progress.summary.note) || progress.message || "Working";
-  elements.scanMessage.className = progress.error ? "status-line error" : "status-line";
-
-  elements.scanRows.innerHTML = progress.accounts
-    .map(
-      (account) => `
-        <tr>
-          <td>${account.account_index}</td>
-          <td title="${account.sapling_address}">${formatZec(account.sapling_zatoshis)}</td>
-          <td title="${account.unified_address}">${formatZec(account.orchard_zatoshis)}</td>
-          <td title="${account.transparent_receive_address}">${formatZec(account.transparent_zatoshis)}</td>
-          <td>${formatZec(account.total_zatoshis)}</td>
-          <td>${account.status}</td>
-        </tr>
-      `,
-    )
-    .join("");
-
-  const fundedAccounts = progress.accounts.filter((account) => account.total_zatoshis > 0).length;
-  const totalZatoshis =
-    (progress.summary && progress.summary.total_zatoshis) ||
-    progress.accounts.reduce((sum, account) => sum + account.total_zatoshis, 0);
-  elements.scanTotals.textContent = `Grand total: ${formatZec(totalZatoshis)} across ${fundedAccounts} funded account${fundedAccounts === 1 ? "" : "s"}.`;
-  elements.scanWorkspace.textContent = progress.summary
-    ? `Workspace: ${progress.summary.workspace_dir}`
-    : "Workspace: preparing persisted wallet state";
-  elements.reviewSweep.disabled = !isSweepReviewAvailable(progress);
-  syncReportPath();
-}
-
-function renderSweepProposal() {
-  if (!state.sweepProposal) {
-    return;
-  }
-
-  elements.sweepRows.innerHTML = state.sweepProposal.transactions.length
-    ? state.sweepProposal.transactions
-        .map(
-          (tx) => `
-            <tr>
-              <td>${tx.source_account}</td>
-              <td>${humanizeSweepKind(tx.kind)}</td>
-              <td><code>${tx.destination}</code></td>
-              <td>${tx.gross_zatoshis}</td>
-              <td>${tx.fee_zatoshis}</td>
-              <td>${tx.net_zatoshis}</td>
-              <td>${tx.memo || "—"}</td>
-            </tr>
-          `,
-        )
-        .join("")
-    : `<tr><td colspan="7">No spendable balances were found in the completed scan.</td></tr>`;
-
-  elements.sweepSummary.textContent = state.sweepProposal.warning || "Proposal ready.";
-  elements.sweepSummary.className = "status-line";
-  elements.sweepSkipped.innerHTML = state.sweepProposal.skipped_accounts.length
-    ? `<pre>${state.sweepProposal.skipped_accounts
-        .map(
-          (skipped) =>
-            `Account ${skipped.account_index}: ${skipped.gross_zatoshis} zats skipped. ${skipped.reason}`,
-        )
-        .join("\n")}</pre>`
-    : "";
-}
-
-function renderCompleteReport() {
-  if (!state.sweepResults.length) {
-    if (!elements.completeReport.innerHTML.trim()) {
-      elements.completeReport.innerHTML =
-        "<p>No broadcast results are available for this session yet.</p>";
+    const info = await invoke("validate_address", { address });
+    if (!info.destination_ok) {
+      setStatus("config-status", "✗ Address must have an Orchard or Sapling receiver.", "error");
+    } else {
+      const pools = [info.has_orchard && "Orchard", info.has_sapling && "Sapling"]
+        .filter(Boolean)
+        .join(" + ");
+      setStatus("config-status", `✓ Valid Unified Address — receivers: ${pools}`, "success");
     }
+  } catch (err) {
+    setStatus("config-status", `✗ ${err}`, "error");
+  }
+}
+
+$("destination-validate").addEventListener("click", validateDestination);
+$("destination-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); validateDestination(); }
+});
+
+$("start-scan").addEventListener("click", async () => {
+  if (!seedInput.value.trim()) {
+    setStatus("config-status", "Seed phrase is required — go back and enter it.", "error");
     return;
   }
 
-  elements.completeReport.innerHTML = `
-    <table>
-      <thead>
-        <tr>
-          <th>Account</th>
-          <th>Status</th>
-          <th>Txid</th>
-          <th>Height</th>
-          <th>Detail</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${state.sweepResults
-          .map((result) => {
-            const explorerUrl = buildExplorerUrl(result.txid);
-            const txidCell = result.txid
-              ? explorerUrl
-                ? `<a href="${explorerUrl}" target="_blank" rel="noreferrer"><code>${result.txid}</code></a>`
-                : `<code>${result.txid}</code>`
-              : "—";
-            return `
-              <tr>
-                <td>${result.source_account}</td>
-                <td>${result.status}</td>
-                <td>${txidCell}</td>
-                <td>${result.confirmed_height || "—"}</td>
-                <td>${result.detail}</td>
-              </tr>
-            `;
-          })
-          .join("")}
-      </tbody>
-    </table>
-  `;
-}
-
-function renderDiscoveries() {
-  if (!state.accountDiscoveries.length) {
-    elements.scanDiscoveries.innerHTML =
-      "<p>No funded legacy accounts have been discovered yet.</p>";
+  const address = $("destination-input").value.trim();
+  if (!address) {
+    setStatus("config-status", "A destination Unified Address is required.", "error");
     return;
   }
 
-  elements.scanDiscoveries.innerHTML = `
-    <strong>Discovery log</strong>
-    <ul class="discovery-list">
-      ${state.accountDiscoveries
-        .map(
-          (account) =>
-            `<li>Account ${account.account_index}: ${formatZec(account.total_zatoshis)} found (${account.status})</li>`,
-        )
-        .join("")}
-    </ul>
-  `;
-}
-
-function splitSeedWords() {
-  return normalizedSeedPhrase()
-    .split(/\s+/)
-    .filter(Boolean);
-}
-
-function normalizedSeedPhrase() {
-  return elements.seedInput.value.trim().replace(/\s+/g, " ");
-}
-
-function isSweepReviewAvailable(progress) {
-  return progress && progress.phase === "complete" && !progress.error;
-}
-
-function humanizeSweepKind(kind) {
-  switch (kind) {
-    case "shield_transparent":
-      return "Shield";
-    case "sweep_shielded":
-      return "Sweep";
-    default:
-      return kind;
-  }
-}
-
-function syncAccountMode() {
-  const manualMode = !elements.autoGapLimit.checked;
-  elements.accountsRange.disabled = !manualMode;
-  elements.accountsRangeValue.textContent = manualMode
-    ? elements.accountsRange.value
-    : `Auto (${elements.gapLimit.value || 20} gap)`;
-}
-
-function applyServerPreset() {
-  const preset = elements.serverPreset.value;
-  if (preset === "custom") {
-    return;
-  }
-
-  if (preset === "recommended") {
-    elements.lightwalletdUrl.value =
-      KNOWN_SERVERS[elements.networkSelect.value] || KNOWN_SERVERS.mainnet;
-    return;
-  }
-
-  elements.lightwalletdUrl.value =
-    KNOWN_SERVERS[preset] || elements.lightwalletdUrl.value;
-}
-
-function syncReportPath() {
-  const workspaceDir =
-    state.scanProgress && state.scanProgress.summary
-      ? state.scanProgress.summary.workspace_dir
-      : elements.dataDir.value.trim() || "./zeck_data";
-  const separator = workspaceDir.endsWith("/") ? "" : "/";
-  elements.reportPath.value = `${workspaceDir}${separator}zeck-recovery-report.txt`;
-}
-
-function mergeSweepResult(result) {
-  const index = state.sweepResults.findIndex((entry) => {
-    if (entry.txid && result.txid) {
-      return entry.txid === result.txid;
+  try {
+    const info = await invoke("validate_address", { address });
+    if (!info.destination_ok) {
+      setStatus("config-status", "✗ Address must have an Orchard or Sapling receiver.", "error");
+      return;
     }
-    return entry.source_account === result.source_account && entry.status === result.status;
-  });
-
-  if (index >= 0) {
-    state.sweepResults[index] = result;
+  } catch (err) {
+    setStatus("config-status", `✗ ${err}`, "error");
     return;
   }
 
-  state.sweepResults.push(result);
+  state.destination = address;
+  state.memo = $("sweep-memo").value.trim() || null;
+  const maxFeeRaw = $("max-fee-zec").value.trim();
+  if (maxFeeRaw && !/^\d*\.?\d{0,8}$/.test(maxFeeRaw)) {
+    setStatus("config-status", "✗ Max fee must be a valid ZEC amount (e.g. 0.0002)", "error");
+    $("start-scan").disabled = false;
+    return;
+  }
+  state.maxFeeZec = maxFeeRaw || null;
+
+  let dataDirVal = $("data-dir").value.trim();
+  if (!dataDirVal) {
+    try {
+      dataDirVal = await invoke("default_data_dir");
+      $("data-dir").value = dataDirVal;
+    } catch (_) {
+      setStatus("config-status", "✗ Could not determine a data directory. Please enter one manually.", "error");
+      $("start-scan").disabled = false;
+      return;
+    }
+  }
+
+  const autoGap = $("auto-gap-limit").checked;
+  const config = {
+    seed: seedInput.value.trim().toLowerCase(),
+    birthday: parseInt($("birthday-height").value, 10) || 419200,
+    num_accounts: autoGap ? null : parseInt($("accounts-range").value, 10),
+    gap_limit: autoGap ? parseInt($("gap-limit").value, 10) : 20,
+    lightwalletd_url: $("lightwalletd-url").value.trim(),
+    data_dir: dataDirVal,
+    network: $("network-select").value,
+  };
+
+  setStatus("config-status", "Starting scan…", "");
+  $("start-scan").disabled = true;
+
+  try {
+    const handle = await invoke("start_scan", { config });
+    state.scanHandle = handle;
+    goTo("scan");
+    await startProgressListeners();
+  } catch (err) {
+    setStatus("config-status", `✗ ${err}`, "error");
+    $("start-scan").disabled = false;
+  }
+});
+
+// ─── Step 4: Scan Progress ────────────────────────────────────────────────────
+
+async function startProgressListeners() {
+  $("scan-phase").textContent = "Starting…";
+  $("scan-server").textContent = "Connecting…";
+  $("scan-progress-text").textContent = "0 / 0";
+  $("scan-eta").textContent = "Estimating remaining time…";
+  $("scan-progress-bar").style.width = "0%";
+  $("scan-rows").innerHTML = "";
+  setStatus("scan-message", "", "");
+  $("review-sweep").disabled = true;
+  $("back-to-config").style.display = "none";
+  eta.reset();
+
+  // Await all three subscriptions before returning. If we stored the unlisten
+  // handles via .then() callbacks, a fast scan-complete event could fire and
+  // run cleanupListeners() before the handles were assigned, leaking the
+  // subscriptions across scans.
+  $("scan-discoveries").innerHTML = "";
+  $("scan-discoveries").style.display = "none";
+
+  const [unlistenProgress, unlistenComplete, unlistenDiscovered] = await Promise.all([
+    listen("scan-progress", (event) => updateScanUI(event.payload)),
+    listen("scan-complete", (event) => {
+      updateScanUI(event.payload);
+      notifyScanComplete(event.payload);
+      cleanupListeners();
+    }),
+    listen("scan-discovery", (event) => {
+      const d = event.payload;
+      const div = document.createElement("div");
+      div.className = "discovery-toast";
+      // at_block_height is the scan frontier when first observed, not the
+      // mined height of the funding transaction — label it that way.
+      const heightHint = d.at_block_height
+        ? ` (scanned through block ${d.at_block_height.toLocaleString()})`
+        : "";
+      div.textContent =
+        `Found ${fmt(d.zatoshis)} on account ${d.account_index} — ${d.pool}${heightHint}`;
+      const container = $("scan-discoveries");
+      container.appendChild(div);
+      container.style.display = "";
+    }),
+  ]);
+  state.unlistenProgress = unlistenProgress;
+  state.unlistenComplete = unlistenComplete;
+  state.unlistenDiscovered = unlistenDiscovered;
 }
 
-function buildRecoveryReport() {
-  const lines = [
-    "ZECK recovery report",
-    "",
-    `Phase: ${state.scanProgress ? state.scanProgress.phase : "unknown"}`,
-    `Network: ${elements.networkSelect.value}`,
-    `Server: ${
-      state.scanProgress && state.scanProgress.server
-        ? state.scanProgress.server.endpoint
-        : elements.lightwalletdUrl.value.trim()
-    }`,
-    `Workspace: ${
-      state.scanProgress && state.scanProgress.summary
-        ? state.scanProgress.summary.workspace_dir
-        : elements.dataDir.value.trim() || "./zeck_data"
-    }`,
-    `Total discovered: ${
-      state.scanProgress && state.scanProgress.summary
-        ? state.scanProgress.summary.total_zatoshis
-        : 0
-    } zats`,
-    "",
-    "Accounts:",
-  ];
+function scanCompletionSummary(progress) {
+  if (progress.error) return progress.error;
+  // Reserve "no funds were found" for actually-completed scans. A
+  // cancelled scan that hadn't yet observed any funds shouldn't claim
+  // the seed is empty — it just stopped early.
+  if (progress.phase === "cancelled") {
+    return "Scan stopped before completion. Re-run with the same flags to resume.";
+  }
+  const funded = (progress.accounts || []).filter((a) => Number(a.total_zatoshis) > 0);
+  if (funded.length === 0) return "No funds were found across all scanned accounts.";
+  const total = funded.reduce((sum, a) => sum + Number(a.total_zatoshis), 0);
+  const noun = funded.length === 1 ? "account" : "accounts";
+  return `Found ${fmt(total)} ${funded.length === 1 ? "on 1" : `across ${funded.length}`} ${noun}.`;
+}
 
-  if (state.scanProgress && state.scanProgress.accounts.length) {
-    state.scanProgress.accounts.forEach((account) => {
-      lines.push(
-        `- Account ${account.account_index}: total=${account.total_zatoshis} sapling=${account.sapling_zatoshis} orchard=${account.orchard_zatoshis} transparent=${account.transparent_zatoshis} status=${account.status}`,
-      );
-    });
+function notifyScanComplete(progress) {
+  let title;
+  switch (progress.phase) {
+    case "complete":  title = "ZECK scan complete"; break;
+    case "cancelled": title = "ZECK scan cancelled"; break;
+    case "error":     title = "ZECK scan failed"; break;
+    default: return;
+  }
+  invoke("notify_user", { title, body: scanCompletionSummary(progress) }).catch(() => {});
+}
+
+function cleanupListeners() {
+  state.unlistenProgress?.();
+  state.unlistenComplete?.();
+  state.unlistenDiscovered?.();
+  state.unlistenProgress = null;
+  state.unlistenComplete = null;
+  state.unlistenDiscovered = null;
+}
+
+function updateScanUI(progress) {
+  state.lastProgress = progress;
+
+  $("scan-phase").textContent = phaseLabel(progress.phase);
+
+  if (progress.server?.endpoint) {
+    const primary = $("lightwalletd-url").value.split(",")[0].trim();
+    const isFallback = progress.server.endpoint !== primary;
+    $("scan-server").textContent = progress.server.endpoint + (isFallback ? " (fallback)" : "");
+    $("scan-server").title = isFallback
+      ? "Connected to a fallback server — a different operator can see your scan activity"
+      : "";
+  }
+
+  const scanned = Number(progress.blocks_scanned);
+  const total = Number(progress.blocks_total);
+  $("scan-progress-text").textContent =
+    `${scanned.toLocaleString()} / ${total.toLocaleString()}`;
+
+  if (total > 0) {
+    $("scan-progress-bar").style.width =
+      `${Math.min(100, (scanned / total) * 100).toFixed(1)}%`;
+  }
+
+  eta.observe(scanned, total);
+  // eraHint expects an absolute Zcash chain height. blocks_scanned is a
+  // delta from effective_birthday — passing it directly mislabels the era
+  // for any wallet whose birthday is past Sapling activation. Use
+  // synced_to_height (set by the backend) when available.
+  const era = progress.synced_to_height ? eraHint(Number(progress.synced_to_height)) : null;
+  const etaState = eta.estimate();
+  let etaText;
+  if (etaState.kind === "warmup") {
+    etaText = "Estimating remaining time…";
+  } else if (etaState.kind === "done") {
+    etaText = "";
   } else {
-    lines.push("- No account rows available");
+    etaText = etaState.text;
+  }
+  if (era) etaText = etaText ? `${etaText} · scanning ~${era}` : `scanning ~${era}`;
+  $("scan-eta").textContent = etaText;
+
+  if (progress.error) {
+    setStatus("scan-message", progress.error, "error");
+    $("back-to-config").style.display = "";
+  } else if (progress.message) {
+    setStatus("scan-message", progress.message, "");
   }
 
-  lines.push("", "Sweep proposal:");
-  if (state.sweepProposal) {
-    lines.push(
-      `- total_send=${state.sweepProposal.total_send_zatoshis} total_fee=${state.sweepProposal.total_fee_zatoshis} net_received=${state.sweepProposal.net_received_zatoshis}`,
-    );
-    state.sweepProposal.transactions.forEach((tx) => {
-      lines.push(
-        `- account=${tx.source_account} kind=${tx.kind} gross=${tx.gross_zatoshis} fee=${tx.fee_zatoshis} net=${tx.net_zatoshis} destination=${tx.destination} memo=${tx.memo || ""}`,
-      );
-    });
-  } else {
-    lines.push("- No sweep proposal generated");
+  if (progress.summary) {
+    const s = progress.summary;
+    const acctCount = progress.accounts.length;
+    $("scan-totals").textContent =
+      `Grand total: ${fmt(s.total_zatoshis)} across ${acctCount} account(s).${s.authoritative_balances ? "" : " (estimates)"}`;
+    $("scan-workspace").textContent = `Workspace: ${s.workspace_dir}`;
   }
 
-  lines.push("", "Broadcast results:");
-  if (state.sweepResults.length) {
-    state.sweepResults.forEach((result) => {
-      lines.push(
-        `- account=${result.source_account} status=${result.status} txid=${result.txid || ""} confirmed_height=${result.confirmed_height || ""} detail=${result.detail}`,
-      );
-    });
-  } else {
-    lines.push("- No broadcast results recorded");
-  }
+  renderAccountRows(progress.accounts);
 
-  return `${lines.join("\n")}\n`;
+  const terminal = ["complete", "cancelled", "error"].includes(progress.phase);
+  $("cancel-scan").style.display = terminal ? "none" : "";
+  if (progress.phase === "complete") {
+    $("review-sweep").disabled = false;
+  }
 }
 
-function buildExplorerUrl(txid) {
-  if (!txid || elements.networkSelect.value !== "mainnet") {
-    return null;
-  }
-  return `https://blockchair.com/zcash/transaction/${txid}`;
-}
-
-function formatZec(zatoshis) {
-  return `${(Number(zatoshis || 0) / 100000000).toFixed(8)} ZEC`;
-}
-
-function formatDuration(seconds) {
-  if (seconds === null || seconds === undefined) {
-    return "—";
-  }
-  const wholeSeconds = Math.max(0, Number(seconds));
-  const minutes = Math.floor(wholeSeconds / 60);
-  const remainingSeconds = wholeSeconds % 60;
-  if (minutes === 0) {
-    return `${remainingSeconds}s`;
-  }
-  return `${minutes}m ${String(remainingSeconds).padStart(2, "0")}s`;
-}
-
-function setStep(step) {
-  state.currentStep = step;
-  const currentIndex = stepOrder.indexOf(step);
-  document.querySelectorAll(".screen").forEach((screen) => {
-    screen.classList.toggle("active", screen.dataset.step === step);
+function renderAccountRows(accounts) {
+  const tbody = $("scan-rows");
+  tbody.innerHTML = "";
+  accounts.forEach((acc) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${acc.account_index}</td>
+      <td>${fmt(acc.sapling_zatoshis)}</td>
+      <td>${fmt(acc.orchard_zatoshis)}</td>
+      <td>${fmt(acc.transparent_zatoshis)}</td>
+      <td>${fmt(acc.total_zatoshis)}</td>
+      <td>${escapeHtml(acc.status)}</td>
+    `;
+    tbody.appendChild(tr);
   });
-  document.querySelectorAll("[data-step-indicator]").forEach((item, index) => {
-    const active = item.dataset.stepIndicator === step;
-    item.classList.toggle("active", active);
-    item.classList.toggle("complete", index < currentIndex);
-  });
 }
 
-function resetFlow() {
+$("back-to-config").addEventListener("click", () => {
+  cleanupListeners();
   state.scanHandle = null;
-  state.scanProgress = null;
-  state.sweepProposal = null;
-  state.sweepResults = [];
-  state.destinationInfo = null;
-  state.accountDiscoveries = [];
-  elements.destinationInput.value = "";
-  elements.sweepMemo.value = "";
-  elements.maxFeeZec.value = "";
-  elements.completeSummary.textContent = "ZECK finished the current recovery workflow.";
-  elements.completeReport.innerHTML = "";
-  elements.saveReportStatus.textContent = "";
-  elements.saveReportStatus.className = "status-line";
-  elements.irreversibleCheck.checked = false;
-  elements.executeSweep.disabled = true;
-  elements.reviewSweep.disabled = true;
-  elements.sweepSkipped.innerHTML = "";
-  renderDiscoveries();
-  syncReportPath();
-  setStep("welcome");
+  $("back-to-config").style.display = "none";
+  $("start-scan").disabled = false;
+  goTo("config");
+});
+
+$("cancel-scan").addEventListener("click", async () => {
+  if (!state.scanHandle) return;
+  try {
+    await invoke("cancel_scan", { handle: state.scanHandle });
+    cleanupListeners();
+    setStatus("scan-message", "Scan cancelled. Workspace state preserved on disk.", "");
+    $("scan-phase").textContent = "Cancelled";
+    $("back-to-config").style.display = "";
+    $("start-scan").disabled = false;
+  } catch (err) {
+    setStatus("scan-message", `Cancel failed: ${err}`, "error");
+  }
+});
+
+$("review-sweep").addEventListener("click", async () => {
+  setStatus("scan-message", "Fetching sweep proposal…", "");
+  $("review-sweep").disabled = true;
+
+  try {
+    const proposal = await invoke("propose_sweep", {
+      handle: state.scanHandle,
+      destination: state.destination,
+      memo: state.memo,
+      maxFeeZec: state.maxFeeZec,
+    });
+    state.sweepProposal = proposal;
+    renderSweepProposal(proposal);
+    goTo("sweep");
+  } catch (err) {
+    setStatus("scan-message", `✗ ${err}`, "error");
+    $("review-sweep").disabled = false;
+  }
+});
+
+// ─── Step 5: Sweep Review ─────────────────────────────────────────────────────
+
+function renderSweepProposal(proposal) {
+  const tbody = $("sweep-rows");
+  tbody.innerHTML = "";
+
+  proposal.transactions.forEach((tx) => {
+    const kindLabel = tx.kind === "shield_transparent" ? "Shield" : "Sweep";
+    const dest = tx.destination;
+    const shortDest =
+      dest.length > 26 ? dest.slice(0, 12) + "…" + dest.slice(-10) : dest;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${tx.source_account}</td>
+      <td>${kindLabel}</td>
+      <td title="${escapeHtml(dest)}" style="cursor:pointer" data-copy="${escapeHtml(dest)}">${escapeHtml(shortDest)} <small>📋</small></td>
+      <td>${fmt(tx.gross_zatoshis)}</td>
+      <td>${fmt(tx.fee_zatoshis)}</td>
+      <td>${fmt(tx.net_zatoshis)}</td>
+      <td>${escapeHtml(tx.memo ?? "—")}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  $("sweep-summary").textContent =
+    `Net received: ${fmt(proposal.net_received_zatoshis)} after ${fmt(proposal.total_fee_zatoshis)} in fees.` +
+    (proposal.warning ? `  ⚠ ${proposal.warning}` : "");
+
+  const skippedEl = $("sweep-skipped");
+  if (proposal.skipped_accounts.length > 0) {
+    const items = proposal.skipped_accounts
+      .map(
+        (s) =>
+          `<li>Account ${s.account_index}: ${escapeHtml(s.reason)} (${fmt(s.gross_zatoshis)})</li>`
+      )
+      .join("");
+    skippedEl.innerHTML = `<p style="margin:6px 0 4px;font-weight:700;color:var(--muted)">Skipped accounts</p><ul class="discovery-list">${items}</ul>`;
+  } else {
+    skippedEl.innerHTML = "";
+  }
+
+  $("irreversible-check").checked = false;
+  $("execute-sweep").disabled = true;
 }
 
-syncAccountMode();
-applyServerPreset();
-renderDiscoveries();
-syncReportPath();
+// Copy-address click handler for sweep table — wired once here so it doesn't
+// accumulate duplicates if renderSweepProposal is called more than once.
+$("sweep-rows").addEventListener("click", (e) => {
+  const cell = e.target.closest("[data-copy]");
+  if (!cell) return;
+  navigator.clipboard.writeText(cell.dataset.copy).then(() => {
+    const orig = cell.innerHTML;
+    cell.innerHTML = "Copied!";
+    setTimeout(() => { cell.innerHTML = orig; }, 1200);
+  });
+});
+
+$("irreversible-check").addEventListener("change", () => {
+  $("execute-sweep").disabled = !$("irreversible-check").checked;
+});
+
+$("execute-sweep").addEventListener("click", async () => {
+  $("execute-sweep").disabled = true;
+  $("irreversible-check").disabled = true;
+
+  try {
+    const results = await invoke("execute_sweep", {
+      handle: state.scanHandle,
+      destination: state.destination,
+      memo: state.memo,
+      maxFeeZec: state.maxFeeZec,
+    });
+    renderCompleteScreen(results);
+    goTo("complete");
+  } catch (err) {
+    $("execute-sweep").disabled = false;
+    $("irreversible-check").disabled = false;
+    $("sweep-skipped").innerHTML =
+      `<p class="status-line error">✗ Sweep failed: ${escapeHtml(String(err))}</p>`;
+  }
+});
+
+// ─── Step 6: Complete ─────────────────────────────────────────────────────────
+
+function renderCompleteScreen(results) {
+  const confirmed = results.filter((r) => r.status === "confirmed").length;
+  const pending = results.filter((r) => r.status === "pending").length;
+  const failed = results.filter((r) => r.status === "failed").length;
+
+  $("complete-summary").textContent =
+    `Sweep finished — ${confirmed} confirmed, ${pending} pending, ${failed} failed.`;
+
+  const rows = results
+    .map((r) => {
+      let line = `Account ${r.source_account}: ${r.status.toUpperCase()}`;
+      if (r.txid) line += `\n  txid: ${r.txid}`;
+      if (r.confirmed_height) line += `\n  confirmed at block ${r.confirmed_height}`;
+      if (r.detail) line += `\n  ${r.detail}`;
+      return line;
+    })
+    .join("\n\n");
+
+  $("complete-report").innerHTML = `<pre>${escapeHtml(rows)}</pre>`;
+
+  const report = buildReport(results);
+  $("save-report").dataset.report = report;
+  $("report-path").value = buildDefaultReportPath();
+}
+
+function buildReport(results) {
+  return [
+    "ZECK Recovery Report",
+    `Date: ${new Date().toISOString()}`,
+    "",
+    "Transaction Results",
+    "──────────────────",
+    ...results.map((r) => {
+      let line = `Account ${r.source_account}: ${r.status}`;
+      if (r.txid) line += `\n  txid: ${r.txid}`;
+      if (r.confirmed_height) line += `\n  confirmed at block ${r.confirmed_height}`;
+      if (r.detail) line += `\n  detail: ${r.detail}`;
+      return line;
+    }),
+  ].join("\n");
+}
+
+function buildDefaultReportPath() {
+  const dir = ($("data-dir")?.value ?? "").trim();
+  if (!dir) return "zeck-recovery-report.txt";
+  const sep = dir.includes("\\") && !dir.includes("/") ? "\\" : "/";
+  return `${dir}${sep}zeck-recovery-report.txt`;
+}
+
+$("save-report").addEventListener("click", async () => {
+  const path = $("report-path").value.trim();
+  const report = $("save-report").dataset.report ?? "";
+  if (!report) {
+    setStatus("save-report-status", "Nothing to save yet.", "error");
+    return;
+  }
+  try {
+    const saved = await invoke("save_recovery_report", { path, report });
+    setStatus("save-report-status", `✓ Saved to ${saved}`, "success");
+  } catch (err) {
+    setStatus("save-report-status", `✗ ${err}`, "error");
+  }
+});
+
+$("restart-flow").addEventListener("click", () => {
+  cleanupListeners();
+  furthestStep = 0;
+  Object.assign(state, {
+    scanHandle: null,
+    lastProgress: null,
+    sweepProposal: null,
+    destination: null,
+    memo: null,
+    maxFeeZec: null,
+  });
+
+  seedInput.value = "";
+  seedVisibility.checked = false;
+  seedInput.classList.add("masked");
+  seedNextBtn.disabled = true;
+  setStatus("seed-status", "", "");
+  setStatus("config-status", "", "");
+  $("destination-input").value = "";
+  $("max-fee-zec").value = "";
+  $("sweep-memo").value = "";
+  $("start-scan").disabled = false;
+
+  // Reset scan screen to blank state so stale results aren't visible if the
+  // user navigates forward via the sidebar before starting a new scan.
+  $("scan-phase").textContent = "Idle";
+  $("scan-server").textContent = "Not connected";
+  $("scan-progress-text").textContent = "0 / 0";
+  $("scan-eta").textContent = "Estimating remaining time…";
+  $("scan-progress-bar").style.width = "0%";
+  $("scan-rows").innerHTML = "";
+  $("scan-discoveries").innerHTML = "";
+  $("scan-discoveries").style.display = "none";
+  $("scan-totals").textContent = "Grand total: 0.00000000 ZEC across 0 accounts.";
+  $("scan-workspace").textContent = "Workspace: not initialized";
+  setStatus("scan-message", "", "");
+  $("review-sweep").disabled = true;
+  $("back-to-config").style.display = "none";
+  $("cancel-scan").style.display = "";
+
+  goTo("welcome");
+});
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+
+$("lightwalletd-url").value = SERVER_PRESETS.mainnet;
+$("gap-limit-row").style.display = $("auto-gap-limit").checked ? "none" : "block";
+$("accounts-range").disabled = !$("auto-gap-limit").checked;
+goTo("welcome");
+
+invoke("default_data_dir")
+  .then((dir) => {
+    if (dir && !$("data-dir").value.trim()) $("data-dir").value = dir;
+  })
+  .catch(() => {
+    // Non-fatal: user can always type a path manually.
+  });
+
+}); // end DOMContentLoaded

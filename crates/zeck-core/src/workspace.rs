@@ -18,6 +18,22 @@ use crate::{
     models::{RuntimeScanConfig, ZeckNetwork},
 };
 
+/// On-disk location of a wallet workspace for one (network, seed, birthday,
+/// gap-strategy) tuple.
+///
+/// Resume keying: identical scan args MUST resolve to the same `root`
+/// across runs. This module's tests pin that contract. The downstream
+/// behavior — that re-running ZECK with the same args actually resumes
+/// from `WalletSummary::fully_scanned_height` — depends on `WalletDb`
+/// and `BlockDb` initializers being idempotent against existing on-disk
+/// workspaces, which is an upstream contract from `zcash_client_sqlite`.
+/// That contract is not pinned here; treat it as a thing to verify
+/// during dependency bumps.
+///
+/// Callers that change birthday or gap-limit between runs intentionally land
+/// on a fresh sub-workspace, so old state is preserved rather than corrupted
+/// by mismatched scan windows. Workspace path layout is pinned by tests in
+/// this module; do not change without updating both.
 #[derive(Debug, Clone)]
 pub struct RecoveryWorkspace {
     root: PathBuf,
@@ -108,5 +124,247 @@ pub fn consensus_network(network: ZeckNetwork) -> Network {
     match network {
         ZeckNetwork::Mainnet => Network::MainNetwork,
         ZeckNetwork::Testnet => Network::TestNetwork,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use secrecy::SecretString;
+
+    use super::*;
+    use crate::models::RuntimeScanConfig;
+
+    /// Resume only works if a re-run with identical args resolves to the same
+    /// on-disk workspace as the previous run. These tests pin the keying
+    /// invariants the resume promise depends on.
+    fn config(
+        seed: &str,
+        birthday: u32,
+        num_accounts: Option<u32>,
+        gap_limit: u32,
+        network: ZeckNetwork,
+    ) -> RuntimeScanConfig {
+        RuntimeScanConfig {
+            seed_phrase: SecretString::new(seed.to_owned()),
+            birthday,
+            num_accounts,
+            gap_limit,
+            lightwalletd_url: "https://example.invalid:443".to_owned(),
+            data_dir: PathBuf::from("/tmp/zeck-test-data"),
+            network,
+        }
+    }
+
+    const SEED: &str = "abandon abandon abandon abandon abandon abandon \
+                        abandon abandon abandon abandon abandon abandon \
+                        abandon abandon abandon abandon abandon abandon \
+                        abandon abandon abandon abandon abandon art";
+
+    const OTHER_SEED: &str = "legal winner thank year wave sausage worth \
+                              useful legal winner thank year wave sausage \
+                              worth useful legal winner thank year wave \
+                              sausage worth title";
+
+    #[test]
+    fn identical_args_produce_identical_workspace_path() {
+        let a = RecoveryWorkspace::from_runtime(&config(
+            SEED,
+            3_280_000,
+            None,
+            20,
+            ZeckNetwork::Mainnet,
+        ))
+        .unwrap();
+        let b = RecoveryWorkspace::from_runtime(&config(
+            SEED,
+            3_280_000,
+            None,
+            20,
+            ZeckNetwork::Mainnet,
+        ))
+        .unwrap();
+        assert_eq!(a.root(), b.root());
+    }
+
+    #[test]
+    fn different_birthday_uses_different_workspace() {
+        // Different birthday is a different scan window, so persisting under
+        // the same dir would corrupt the wallet.sqlite scan_summary state.
+        let a = RecoveryWorkspace::from_runtime(&config(
+            SEED,
+            3_280_000,
+            None,
+            20,
+            ZeckNetwork::Mainnet,
+        ))
+        .unwrap();
+        let b = RecoveryWorkspace::from_runtime(&config(
+            SEED,
+            2_500_000,
+            None,
+            20,
+            ZeckNetwork::Mainnet,
+        ))
+        .unwrap();
+        assert_ne!(a.root(), b.root());
+    }
+
+    #[test]
+    fn different_gap_limit_uses_different_workspace() {
+        // Different gap_limit means a different number of derived accounts to
+        // scan against — must not silently reuse the smaller workspace.
+        let a = RecoveryWorkspace::from_runtime(&config(
+            SEED,
+            3_280_000,
+            None,
+            20,
+            ZeckNetwork::Mainnet,
+        ))
+        .unwrap();
+        let b = RecoveryWorkspace::from_runtime(&config(
+            SEED,
+            3_280_000,
+            None,
+            40,
+            ZeckNetwork::Mainnet,
+        ))
+        .unwrap();
+        assert_ne!(a.root(), b.root());
+    }
+
+    #[test]
+    fn explicit_num_accounts_uses_different_workspace_than_gap_limit() {
+        let a = RecoveryWorkspace::from_runtime(&config(
+            SEED,
+            3_280_000,
+            None,
+            20,
+            ZeckNetwork::Mainnet,
+        ))
+        .unwrap();
+        let b = RecoveryWorkspace::from_runtime(&config(
+            SEED,
+            3_280_000,
+            Some(20),
+            20,
+            ZeckNetwork::Mainnet,
+        ))
+        .unwrap();
+        assert_ne!(
+            a.root(),
+            b.root(),
+            "auto-gap and explicit num-accounts use different scan strategies and \
+             must persist to separate workspaces"
+        );
+    }
+
+    #[test]
+    fn different_network_uses_different_workspace() {
+        let a = RecoveryWorkspace::from_runtime(&config(
+            SEED,
+            3_280_000,
+            None,
+            20,
+            ZeckNetwork::Mainnet,
+        ))
+        .unwrap();
+        let b = RecoveryWorkspace::from_runtime(&config(
+            SEED,
+            3_280_000,
+            None,
+            20,
+            ZeckNetwork::Testnet,
+        ))
+        .unwrap();
+        assert_ne!(a.root(), b.root());
+    }
+
+    #[test]
+    fn different_seed_uses_different_workspace() {
+        // Without seed-fingerprint isolation, two users sharing a data_dir
+        // could clobber each other's workspaces.
+        let a = RecoveryWorkspace::from_runtime(&config(
+            SEED,
+            3_280_000,
+            None,
+            20,
+            ZeckNetwork::Mainnet,
+        ))
+        .unwrap();
+        let b = RecoveryWorkspace::from_runtime(&config(
+            OTHER_SEED,
+            3_280_000,
+            None,
+            20,
+            ZeckNetwork::Mainnet,
+        ))
+        .unwrap();
+        assert_ne!(a.root(), b.root());
+    }
+
+    #[test]
+    fn workspace_root_lives_under_data_dir() {
+        let cfg = config(SEED, 3_280_000, None, 20, ZeckNetwork::Mainnet);
+        let ws = RecoveryWorkspace::from_runtime(&cfg).unwrap();
+        assert!(
+            ws.root().starts_with(&cfg.data_dir),
+            "workspace root {} must live under data_dir {}",
+            ws.root().display(),
+            cfg.data_dir.display(),
+        );
+    }
+
+    #[test]
+    fn print_fingerprint_for_snapshot() {
+        // Prints the expected SeedFingerprint string for the fixed test
+        // SEED so the snapshot test below can pin it. Run with
+        // `cargo test workspace::tests::print_fingerprint_for_snapshot
+        // -- --nocapture` to update the SEED_FINGERPRINT constant when
+        // the upstream algorithm or display format changes intentionally.
+        let cfg = config(SEED, 3_280_000, None, 20, ZeckNetwork::Mainnet);
+        let ws = RecoveryWorkspace::from_runtime(&cfg).unwrap();
+        let suffix = ws
+            .root()
+            .strip_prefix(&cfg.data_dir)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let parts: Vec<&str> = suffix.split('/').collect();
+        eprintln!("fingerprint = {}", parts[1]);
+    }
+
+    #[test]
+    fn workspace_path_does_not_change_across_releases() {
+        // Snapshot the keying so an accidental change to the path layout
+        // shows up as a test failure rather than a silently-orphaned
+        // workspace on every user's disk. The fingerprint segment is
+        // pinned to the *exact* string, not just the HRP, so a change
+        // in the upstream zip32::SeedFingerprint algorithm or display
+        // format will flip this test (which would otherwise silently
+        // orphan every existing user's workspace dir).
+        const EXPECTED_FINGERPRINT_FOR_TEST_SEED: &str =
+            "zip32seedfp1uc59thq5rxtjutv06dymwsx7dfna3nm0a2h7jr8j7dazx3zkdnxqqgyu24";
+        let cfg = config(SEED, 3_280_000, None, 20, ZeckNetwork::Mainnet);
+        let ws = RecoveryWorkspace::from_runtime(&cfg).unwrap();
+        let suffix = ws
+            .root()
+            .strip_prefix(&cfg.data_dir)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        // network / seed-fp / birthday-N / auto-gap-M
+        let parts: Vec<&str> = suffix.split('/').collect();
+        assert_eq!(parts.len(), 4, "unexpected workspace path layout: {suffix}");
+        assert_eq!(parts[0], "mainnet");
+        assert_eq!(
+            parts[1], EXPECTED_FINGERPRINT_FOR_TEST_SEED,
+            "seed fingerprint changed for the fixed test seed — if intentional, \
+             update EXPECTED_FINGERPRINT_FOR_TEST_SEED, but be aware this means \
+             every existing user's workspace dir is now orphaned"
+        );
+        assert_eq!(parts[2], "birthday-3280000");
+        assert_eq!(parts[3], "auto-gap-20");
     }
 }

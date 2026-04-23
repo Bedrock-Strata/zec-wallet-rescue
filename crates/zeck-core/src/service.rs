@@ -53,6 +53,7 @@ struct ScanSession {
     runtime: RuntimeScanConfig,
     started_at: Instant,
     task: Mutex<Option<JoinHandle<()>>>,
+    workspace_root: std::path::PathBuf,
 }
 
 type SharedScanSession = Arc<ScanSession>;
@@ -85,11 +86,29 @@ impl RecoveryService {
             data_dir: config.data_dir,
             network: config.network,
         };
+
+        let workspace_root = RecoveryWorkspace::from_runtime(&runtime)?.root().to_owned();
+
+        // Cancel any existing session targeting the same workspace to prevent
+        // concurrent SQLite writers from locking each other out.
+        let conflicting: Vec<ScanHandle> = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .iter()
+                .filter(|(_, session)| session.workspace_root == workspace_root)
+                .map(|(id, _)| ScanHandle { id: id.clone() })
+                .collect()
+        };
+        for conflicting_handle in conflicting {
+            let _ = self.cancel_scan(&conflicting_handle).await;
+        }
+
         let session = Arc::new(ScanSession {
             state: state.clone(),
             runtime: runtime.clone(),
             started_at: Instant::now(),
             task: Mutex::new(None),
+            workspace_root,
         });
 
         self.sessions
@@ -111,10 +130,12 @@ impl RecoveryService {
     pub async fn get_scan_progress(&self, handle: &ScanHandle) -> ZeckResult<ScanProgress> {
         let session = self.session(handle).await?;
         let mut progress = session.state.lock().await.progress.clone();
-        let elapsed_seconds = session.started_at.elapsed().as_secs();
-        progress.elapsed_seconds = Some(elapsed_seconds);
-        progress.estimated_remaining_seconds =
-            estimate_remaining_seconds(&progress, elapsed_seconds);
+        let session_elapsed = session.started_at.elapsed().as_secs();
+        // Use scan-phase elapsed (set by ProgressPoller from when scanning began) for
+        // the rate calculation so pre-scan phases don't dilute the blocks/sec estimate.
+        let scan_elapsed = progress.elapsed_seconds.unwrap_or(session_elapsed);
+        progress.elapsed_seconds = Some(session_elapsed);
+        progress.estimated_remaining_seconds = estimate_remaining_seconds(&progress, scan_elapsed);
         Ok(progress)
     }
 
@@ -135,7 +156,13 @@ impl RecoveryService {
         if let Some(task) = session.task.lock().await.take() {
             task.abort();
         }
-        spawn_session_cleanup(self.sessions.clone(), handle.id.clone());
+        // spawn_session_cleanup is intentionally omitted here: aborting the
+        // task prevents the scan from completing naturally, so the cleanup
+        // that was scheduled in start_scan will not fire.  We schedule a
+        // fresh one to ensure the session is eventually removed.
+        if self.sessions.read().await.contains_key(&handle.id) {
+            spawn_session_cleanup(self.sessions.clone(), handle.id.clone());
+        }
         Ok(())
     }
 
@@ -384,16 +411,10 @@ async fn execute_sweep_for_session(
 ) -> ZeckResult<Vec<TxBroadcastResult>> {
     let destination = validate_destination_address(&request.destination)?;
     let memo_text = normalized_memo_text(request.memo.as_deref())?;
-    let memo_bytes = if memo_text == RECOVERY_MEMO_DEFAULT {
-        Some(MemoBytes::from_bytes(memo_text.as_bytes()).map_err(|err| {
-            ZeckError::InvalidMemo(format!("default recovery memo could not be encoded: {err}"))
-        })?)
-    } else {
-        Some(
-            MemoBytes::from_bytes(memo_text.as_bytes())
-                .map_err(|err| ZeckError::InvalidMemo(err.to_string()))?,
-        )
-    };
+    let memo_bytes = Some(
+        MemoBytes::from_bytes(memo_text.as_bytes())
+            .map_err(|err| ZeckError::InvalidMemo(err.to_string()))?,
+    );
 
     let (runtime, workspace, tracked_accounts, progress) = {
         let guard = session.state.lock().await;
@@ -466,17 +487,22 @@ async fn execute_sweep_for_session(
         let transparent_balance =
             account_transparent_zatoshis(&workspace, runtime.network, &tracked_account)?;
         if transparent_balance > 0 {
-            let fee = execute_shielding_step(
-                &workspace,
-                runtime.network,
-                &mut client,
-                &tracked_account,
-                &transparent_account,
-                &usk,
-                &prover,
-                &mut results,
-            )
-            .await?;
+            let fee = {
+                let mut ctx = SweepStepCtx {
+                    workspace: &workspace,
+                    network: runtime.network,
+                    client: &mut client,
+                    prover: &prover,
+                    results: &mut results,
+                };
+                execute_shielding_step(
+                    &mut ctx,
+                    &tracked_account,
+                    &transparent_account,
+                    &usk,
+                )
+                .await?
+            };
             total_fee_zatoshis = total_fee_zatoshis.checked_add(fee).ok_or_else(|| {
                 ZeckError::Internal("fee total overflowed the supported range".to_owned())
             })?;
@@ -496,18 +522,23 @@ async fn execute_sweep_for_session(
             .await?;
         }
 
-        let fee = execute_send_max_step(
-            &workspace,
-            runtime.network,
-            &mut client,
-            &tracked_account,
-            &usk,
-            &destination_address,
-            memo_bytes.clone(),
-            &prover,
-            &mut results,
-        )
-        .await?;
+        let fee = {
+            let mut ctx = SweepStepCtx {
+                workspace: &workspace,
+                network: runtime.network,
+                client: &mut client,
+                prover: &prover,
+                results: &mut results,
+            };
+            execute_send_max_step(
+                &mut ctx,
+                &tracked_account,
+                &usk,
+                &destination_address,
+                memo_bytes.clone(),
+            )
+            .await?
+        };
         total_fee_zatoshis = total_fee_zatoshis.checked_add(fee).ok_or_else(|| {
             ZeckError::Internal("fee total overflowed the supported range".to_owned())
         })?;
@@ -517,26 +548,30 @@ async fn execute_sweep_for_session(
     Ok(results)
 }
 
-async fn execute_shielding_step(
-    workspace: &RecoveryWorkspace,
+struct SweepStepCtx<'a> {
+    workspace: &'a RecoveryWorkspace,
     network: crate::models::ZeckNetwork,
-    client: &mut CompactTxStreamerClient<tonic::transport::Channel>,
+    client: &'a mut CompactTxStreamerClient<tonic::transport::Channel>,
+    prover: &'a LocalTxProver,
+    results: &'a mut Vec<TxBroadcastResult>,
+}
+
+async fn execute_shielding_step(
+    ctx: &mut SweepStepCtx<'_>,
     tracked_account: &TrackedAccount,
     transparent_account: &zcash_transparent::keys::AccountPrivKey,
     usk: &UnifiedSpendingKey,
-    prover: &LocalTxProver,
-    results: &mut Vec<TxBroadcastResult>,
 ) -> ZeckResult<u64> {
     let mut wallet_db = WalletDb::for_path(
-        workspace.wallet_db_path(),
-        consensus_network(network),
+        ctx.workspace.wallet_db_path(),
+        consensus_network(ctx.network),
         SystemClock,
         rand_core::OsRng,
     )
     .map_err(|err| {
         ZeckError::Storage(format!(
             "opening wallet database {}: {err}",
-            workspace.wallet_db_path().display()
+            ctx.workspace.wallet_db_path().display()
         ))
     })?;
     let input_selector = GreedyInputSelector::<_>::new();
@@ -549,7 +584,7 @@ async fn execute_shielding_step(
 
     let proposal = propose_shielding::<_, _, _, _, Infallible>(
         &mut wallet_db,
-        &consensus_network(network),
+        &consensus_network(ctx.network),
         &input_selector,
         &change_strategy,
         Zatoshis::ZERO,
@@ -579,9 +614,9 @@ async fn execute_shielding_step(
     );
     let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
         &mut wallet_db,
-        &consensus_network(network),
-        prover,
-        prover,
+        &consensus_network(ctx.network),
+        ctx.prover,
+        ctx.prover,
         &SpendingKeys::new(usk.clone(), standalone_keys),
         OvkPolicy::Sender,
         &proposal,
@@ -590,11 +625,11 @@ async fn execute_shielding_step(
 
     broadcast_transactions(
         &mut wallet_db,
-        client,
+        ctx.client,
         tracked_account.derived.index,
         txids.into_iter().collect(),
         "shielding",
-        results,
+        ctx.results,
     )
     .await?;
 
@@ -602,32 +637,28 @@ async fn execute_shielding_step(
 }
 
 async fn execute_send_max_step(
-    workspace: &RecoveryWorkspace,
-    network: crate::models::ZeckNetwork,
-    client: &mut CompactTxStreamerClient<tonic::transport::Channel>,
+    ctx: &mut SweepStepCtx<'_>,
     tracked_account: &TrackedAccount,
     usk: &UnifiedSpendingKey,
     destination_address: &ZcashAddress,
     memo_bytes: Option<MemoBytes>,
-    prover: &LocalTxProver,
-    results: &mut Vec<TxBroadcastResult>,
 ) -> ZeckResult<u64> {
     let mut wallet_db = WalletDb::for_path(
-        workspace.wallet_db_path(),
-        consensus_network(network),
+        ctx.workspace.wallet_db_path(),
+        consensus_network(ctx.network),
         SystemClock,
         rand_core::OsRng,
     )
     .map_err(|err| {
         ZeckError::Storage(format!(
             "opening wallet database {}: {err}",
-            workspace.wallet_db_path().display()
+            ctx.workspace.wallet_db_path().display()
         ))
     })?;
 
     let proposal = propose_send_max_transfer::<_, _, _, Infallible>(
         &mut wallet_db,
-        &consensus_network(network),
+        &consensus_network(ctx.network),
         tracked_account.wallet_account_id,
         &[ShieldedProtocol::Sapling, ShieldedProtocol::Orchard],
         &StandardFeeRule::Zip317,
@@ -641,9 +672,9 @@ async fn execute_send_max_step(
 
     let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
         &mut wallet_db,
-        &consensus_network(network),
-        prover,
-        prover,
+        &consensus_network(ctx.network),
+        ctx.prover,
+        ctx.prover,
         &SpendingKeys::from_unified_spending_key(usk.clone()),
         OvkPolicy::Sender,
         &proposal,
@@ -652,11 +683,11 @@ async fn execute_send_max_step(
 
     broadcast_transactions(
         &mut wallet_db,
-        client,
+        ctx.client,
         tracked_account.derived.index,
         txids.into_iter().collect(),
         "sweep",
-        results,
+        ctx.results,
     )
     .await?;
 
@@ -700,9 +731,13 @@ async fn broadcast_transactions(
             .map_err(|err| ZeckError::Broadcast(err.to_string()))?
             .into_inner();
         if response.error_code != 0 {
+            let reason = if response.error_message.is_empty() {
+                format!("error code {}", response.error_code)
+            } else {
+                response.error_message.clone()
+            };
             return Err(ZeckError::Broadcast(format!(
-                "{label} transaction {txid} was rejected: {}",
-                response.error_message
+                "{label} transaction {txid} was rejected: {reason}"
             )));
         }
 
@@ -923,7 +958,7 @@ fn estimate_remaining_seconds(progress: &ScanProgress, elapsed_seconds: u64) -> 
     if progress.blocks_scanned >= progress.blocks_total {
         return Some(0);
     }
-    if progress.blocks_scanned == 0 || elapsed_seconds == 0 {
+    if progress.blocks_scanned < 100 || elapsed_seconds < 5 {
         return None;
     }
 
@@ -971,9 +1006,11 @@ mod tests {
             phase: ScanPhase::Complete,
             blocks_scanned: 1,
             blocks_total: 1,
+            synced_to_height: None,
             elapsed_seconds: None,
             estimated_remaining_seconds: None,
             accounts: vec![account],
+            discoveries: vec![],
             summary: None,
             server: None,
             message: None,
@@ -995,6 +1032,7 @@ mod tests {
                 orchard_zatoshis: 0,
                 transparent_zatoshis: 30_000,
                 total_zatoshis: 70_000,
+                has_activity: true,
                 status: "ok".to_owned(),
             }),
             SweepRequest {
@@ -1028,6 +1066,7 @@ mod tests {
                 orchard_zatoshis: 0,
                 transparent_zatoshis: 50_000,
                 total_zatoshis: 50_000,
+                has_activity: true,
                 status: "ok".to_owned(),
             }),
             SweepRequest {
@@ -1055,6 +1094,7 @@ mod tests {
                 orchard_zatoshis: 0,
                 transparent_zatoshis: 5_000,
                 total_zatoshis: 5_000,
+                has_activity: true,
                 status: "ok".to_owned(),
             }),
             SweepRequest {
@@ -1067,5 +1107,36 @@ mod tests {
 
         assert!(proposal.transactions.is_empty());
         assert_eq!(proposal.skipped_accounts.len(), 1);
+    }
+
+    #[test]
+    fn memo_with_ascii_is_accepted() {
+        use super::normalized_memo_text;
+        let result = normalized_memo_text(Some("ZECK recovery"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn memo_with_emoji_is_accepted_when_short_enough() {
+        use super::normalized_memo_text;
+        // emoji are 4 bytes each — a handful should still fit within the 512-byte limit
+        let result = normalized_memo_text(Some("🎉 recovery 🎉"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn memo_exceeding_512_bytes_is_rejected() {
+        use super::normalized_memo_text;
+        // each '🎉' is 4 bytes; 129 of them = 516 bytes, over the 512-byte memo limit
+        let long_memo = "🎉".repeat(129);
+        let result = normalized_memo_text(Some(&long_memo));
+        assert!(result.is_err(), "expected InvalidMemo for oversized memo");
+    }
+
+    #[test]
+    fn empty_memo_falls_back_to_default() {
+        use super::{normalized_memo_text, RECOVERY_MEMO_DEFAULT};
+        let result = normalized_memo_text(Some("   ")).unwrap();
+        assert_eq!(result, RECOVERY_MEMO_DEFAULT);
     }
 }

@@ -9,54 +9,59 @@
   <body>
     <div class="app-shell">
       <aside class="sidebar">
-        <div>
-          <p class="eyebrow">ZecWallet Lite Recovery</p>
-          <div class="sidebar-brand">
-            <img src="./zeck-icon.svg" alt="" width="54" height="54" />
-            <h1>ZECK</h1>
+        <div class="sidebar-top">
+          <div>
+            <p class="eyebrow">ZecWallet Lite Recovery</p>
+            <div class="sidebar-brand">
+              <img src="./zeck-icon.svg" alt="" width="54" height="54" />
+              <h1>ZECK</h1>
+            </div>
+            <p class="sidebar-copy">
+              Recover your Zcash from ZecWallet Lite and send it safely to your new wallet.
+            </p>
           </div>
-          <p class="sidebar-copy">
-            A careful recovery workspace for legacy seeds, built around a guided desktop flow and
-            a shared Rust core.
-          </p>
+
+          <ol class="step-list">
+            <li data-step-indicator="welcome">Welcome</li>
+            <li data-step-indicator="seed">Seed Entry</li>
+            <li data-step-indicator="config">Configure</li>
+            <li data-step-indicator="scan">Scan</li>
+            <li data-step-indicator="sweep">Sweep</li>
+            <li data-step-indicator="complete">Complete</li>
+          </ol>
         </div>
 
-        <ol class="step-list">
-          <li data-step-indicator="welcome">Welcome</li>
-          <li data-step-indicator="seed">Seed Entry</li>
-          <li data-step-indicator="config">Configure</li>
-          <li data-step-indicator="scan">Scan</li>
-          <li data-step-indicator="sweep">Sweep</li>
-          <li data-step-indicator="complete">Complete</li>
-        </ol>
+        <p class="sidebar-credit" aria-label="Built by Sovright">
+          <span class="sidebar-credit-prefix">Built by</span>
+          <span class="sidebar-credit-mark" role="img" aria-label="Sovright"></span>
+        </p>
       </aside>
 
       <main class="main-panel">
         <section class="screen active" data-step="welcome">
           <p class="eyebrow">Step 1</p>
-          <h2>Recover a discontinued wallet carefully</h2>
+          <h2>Recover your wallet in a few steps</h2>
           <p class="lead">
-            ZECK re-derives the non-standard ZecWallet Lite address layout from a 24-word seed,
-            then guides you through scanning and preparing a sweep to a modern Unified Address.
+            Enter your 24-word seed phrase and ZECK will find your funds and walk you through sending them to your new wallet.
           </p>
           <div class="card-grid">
             <article class="info-card">
               <h3>Seed-only recovery</h3>
-              <p>You do not need a legacy wallet database to begin the recovery flow.</p>
+              <p>All you need is your 24-word seed phrase — no files or backups required.</p>
             </article>
             <article class="info-card">
-              <h3>Local-first</h3>
-              <p>Seed validation and derivation happen locally in the Tauri Rust backend.</p>
+              <h3>Privacy first</h3>
+              <p>Everything happens on your computer. Your seed phrase is never sent anywhere.</p>
             </article>
             <article class="info-card">
-              <h3>Incremental recovery</h3>
-              <p>ZECK keeps a local recovery workspace so scans can resume and real sweeps can build from authoritative wallet state.</p>
+              <h3>Pick up where you left off</h3>
+              <p>If the scan is interrupted, ZECK saves your progress so you don't have to start over.</p>
             </article>
           </div>
           <div class="actions">
             <button class="primary" data-next="seed">I have my 24-word seed phrase</button>
             <a class="secondary-link" href="https://github.com/zingolabs/zexcavator" target="_blank"
-              >I have a .dat file instead</a
+              >I have a .dat file</a
             >
           </div>
         </section>
@@ -96,28 +101,41 @@
                 <option value="mainnet" selected>Mainnet</option>
                 <option value="testnet">Testnet</option>
               </select>
+              <small>Use Mainnet unless you were testing with play money (testnet).</small>
             </label>
             <label class="field">
-              <span>Birthday height</span>
+              <span>Wallet birthday</span>
               <input id="birthday-height" type="number" min="0" value="419200" />
+              <small>The block number when your wallet was created. Not sure? Use the date picker below to estimate it automatically.</small>
+              <small id="birthday-scan-estimate" style="font-weight:600"></small>
             </label>
             <label class="field">
-              <span>Date helper</span>
+              <span>Approximate wallet creation date</span>
               <input id="birthday-date" type="date" />
+              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+                <button class="ghost" id="birthday-estimate">Estimate from this date</button>
+                <button class="ghost" id="birthday-autodetect">Auto-detect (probes node)</button>
+              </div>
+              <small id="birthday-probe-status" style="color:var(--color-muted,#888)"></small>
+              <small>Pick roughly when you first created your ZecWallet Lite — ZECK will fill in the block number for you. Or use <strong>Auto-detect</strong> to probe the blockchain (requires your seed phrase from step 2).</small>
             </label>
             <label class="field">
-              <span>Accounts to scan</span>
+              <span>Number of accounts to scan</span>
               <input id="accounts-range" type="range" min="1" max="500" value="20" />
               <strong id="accounts-range-value">20</strong>
+              <small>Most users only ever had 1 account. Leave at 20 to be safe.</small>
             </label>
             <label class="checkline field">
               <input id="auto-gap-limit" type="checkbox" checked />
-              <span>Use auto gap-limit mode</span>
+              <span>Scan until no more funds are found <em>(recommended)</em></span>
             </label>
-            <label class="field">
-              <span>Gap limit</span>
-              <input id="gap-limit" type="number" min="1" max="50" value="20" />
-            </label>
+            <div id="gap-limit-row" class="field" style="display:none">
+              <label class="field">
+                <span>Advanced: how many empty accounts before stopping</span>
+                <input id="gap-limit" type="number" min="1" max="50" value="20" />
+                <small>Only change this if you know you had many unused accounts. Default of 20 is fine for almost everyone.</small>
+              </label>
+            </div>
             <label class="field">
               <span>Server preset</span>
               <select id="server-preset">
@@ -126,35 +144,39 @@
                 <option value="testnet">Testnet public server</option>
                 <option value="custom">Keep custom value</option>
               </select>
+              <small>Leave on "Recommended" unless you have your own server.</small>
             </label>
             <label class="field span-two">
-              <span>lightwalletd server</span>
+              <span>Zcash node address (lightwalletd)</span>
               <input
                 id="lightwalletd-url"
                 type="text"
-                value="https://mainnet.lightwalletd.com:9067"
+                value="https://zec.rocks:443,https://na.zec.rocks:443"
               />
-              <small>Comma-separated URLs are tried in order for fallback.</small>
+              <small>The server ZECK connects to for blockchain data. Auto-filled by the preset above. You can add backup servers separated by commas.</small>
             </label>
             <label class="field span-two">
-              <span>Recovery workspace directory</span>
-              <input id="data-dir" type="text" value="./zeck_data" />
+              <span>Where to save scan data on this computer</span>
+              <input id="data-dir" type="text" placeholder="platform default populated on load" />
+              <small>ZECK saves its progress here so a scan can be resumed if interrupted. Change this to a permanent folder if you want to keep the data after a reboot.</small>
             </label>
             <label class="field span-two">
-              <span>Destination Unified Address</span>
+              <span>Destination address — where to send your recovered ZEC</span>
               <input id="destination-input" type="text" placeholder="u1..." />
+              <small>Must be a Unified Address starting with "u1" from your new wallet (e.g. Zashi or Ywallet). Transparent (t1…) and Sapling (zs…) addresses are not accepted.</small>
             </label>
             <label class="field span-two">
               <span>Recovery memo (optional)</span>
               <input id="sweep-memo" type="text" placeholder="ZECK recovery" />
+              <small>A short note attached to the recovery transaction. Visible only to the sender and recipient. <span id="memo-byte-count"></span></small>
             </label>
             <label class="field">
-              <span>Max estimated fee in ZEC (optional)</span>
+              <span>Max transaction fee in ZEC (optional)</span>
               <input id="max-fee-zec" type="text" inputmode="decimal" placeholder="0.0002" />
+              <small>Leave blank to use the standard fee (~0.0002 ZEC). Only change this if you know what you're doing.</small>
             </label>
           </div>
           <div class="inline-actions">
-            <button class="ghost" id="birthday-estimate">Estimate birthday from date</button>
             <button class="ghost" id="destination-validate">Validate destination</button>
           </div>
           <p id="config-status" class="status-line"></p>
@@ -171,6 +193,13 @@
             ZECK persists a local wallet workspace while it syncs compact blocks and transparent
             UTXOs. Cancelling a session keeps that on-disk state for later reuse.
           </div>
+          <div class="banner info" id="scan-resume-info">
+            <strong>Safe to interrupt.</strong> Progress is saved automatically — quit ZECK or
+            cancel the scan at any time, then re-run with the same data directory, network,
+            birthday, and account-scan settings (the same gap limit, or the same explicit
+            account count) to resume from the last persisted block. Changing any of those
+            intentionally starts a fresh scan from the new birthday.
+          </div>
           <div class="metric-panel">
             <div>
               <span class="metric-label">Phase</span>
@@ -185,8 +214,8 @@
               <strong id="scan-progress-text">0 / 0</strong>
             </div>
             <div>
-              <span class="metric-label">Elapsed / ETA</span>
-              <strong id="scan-eta">0s / —</strong>
+              <span class="metric-label">Time remaining</span>
+              <strong id="scan-eta">Estimating remaining time…</strong>
             </div>
           </div>
           <div class="progress-shell">
@@ -212,9 +241,10 @@
               <tbody id="scan-rows"></tbody>
             </table>
           </div>
-          <div class="report-card" id="scan-discoveries"></div>
+          <div class="report-card" id="scan-discoveries" style="display:none"></div>
           <div class="actions split">
             <button class="secondary" id="cancel-scan">Cancel</button>
+            <button class="ghost" id="back-to-config" style="display:none">← Back to config</button>
             <button class="primary" id="review-sweep" disabled>Review & Sweep</button>
           </div>
         </section>
@@ -277,6 +307,6 @@
       </main>
     </div>
 
-    <script type="module" src="./main.js"></script>
+    <script src="./main.js"></script>
   </body>
 </html>

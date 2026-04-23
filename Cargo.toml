@@ -7,7 +7,7 @@ edition = "2021"
 version = "0.1.0"
 license = "MIT"
 authors = ["ZECK contributors"]
-rust-version = "1.85"
+rust-version = "1.86"
 repository = "https://github.com/example/zeck"
 
 [workspace.dependencies]
@@ -43,6 +43,7 @@ zcash_primitives = "0.26.4"
 zcash_proofs = { version = "0.26.1", default-features = false, features = ["bundled-prover"] }
 zcash_protocol = "0.7.2"
 zcash_transparent = { version = "0.6.3", default-features = false, features = ["std", "transparent-inputs"] }
+tempfile = "3.20.0"
 zip32 = "0.2.1"
 
 [profile.release]
