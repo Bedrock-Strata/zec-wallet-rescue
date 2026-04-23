@@ -8,7 +8,8 @@ rescue wallet subdomain.
 - `index.html`: product splash page
 - `guide.html`: user guide
 - `styles.css`: shared site styles
-- `assets/zeck-icon.png`: app icon copied from the Tauri bundle
+- `assets/zeck-icon.svg`: editable source for the green key-glyph product icon
+- `assets/zeck-icon.png`: rendered site favicon and header icon
 - `assets/sovright-logo-caption.svg`: Sovright caption wordmark used in the header
 - `assets/zeck-og.png`: 1200x630 Open Graph and Twitter Card preview image
 - `assets/zeck-og.svg`: editable source for the social preview image
