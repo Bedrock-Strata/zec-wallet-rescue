@@ -38,10 +38,24 @@ table {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-w, 220px) 8px minmax(0, 1fr);
   min-height: 100vh;
-  gap: 24px;
-  padding: 24px;
+  gap: 0;
+  padding: 20px;
+  column-gap: 0;
+}
+
+.sidebar-resize-handle {
+  width: 8px;
+  cursor: col-resize;
+  margin: 0 6px;
+  border-radius: 4px;
+  transition: background 120ms ease;
+}
+
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle.dragging {
+  background: var(--line);
 }
 
 .sidebar,
@@ -98,8 +112,8 @@ table {
      wordmark to match the surrounding muted text instead of using the
      SVG's hardcoded fill. <img src> can't inherit text color. */
   display: inline-block;
-  height: 0.95rem;
-  width: calc(0.95rem * (90 / 34));
+  height: 0.72rem;
+  width: calc(0.72rem * (90 / 34));
   background-color: currentColor;
   mask-image: url("./assets/sovright-caption.svg");
   -webkit-mask-image: url("./assets/sovright-caption.svg");
@@ -608,9 +622,49 @@ pre {
   }
 }
 
-@media (max-width: 980px) {
+/* Config/scan screens have dense content — use a tighter heading */
+.screen[data-step="config"] h2,
+.screen[data-step="scan"] h2,
+.screen[data-step="sweep"] h2,
+.screen[data-step="complete"] h2 {
+  font-size: clamp(1.3rem, 2vw, 1.6rem);
+  margin-bottom: 10px;
+}
+
+/* select consistent with input */
+select {
+  width: 100%;
+  padding: 14px 16px;
+  font-size: 0.98rem;
+  font-family: "IBM Plex Sans", "Avenir Next", "Helvetica Neue", sans-serif;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  appearance: none;
+  cursor: pointer;
+}
+
+/* ghost buttons nested inside form fields (e.g. birthday helpers) */
+.field button.ghost {
+  padding: 8px 14px;
+  font-size: 0.84rem;
+}
+
+/* tighten the accounts range display value */
+#accounts-range-value {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+@media (max-width: 880px) {
   .app-shell {
     grid-template-columns: 1fr;
+  }
+
+  .sidebar-resize-handle {
+    display: none;
   }
 
   .card-grid,

@@ -10,10 +10,10 @@
     "windows": [
       {
         "title": "ZECK",
-        "width": 1180,
-        "height": 860,
-        "minWidth": 940,
-        "minHeight": 720,
+        "width": 1320,
+        "height": 880,
+        "minWidth": 780,
+        "minHeight": 640,
         "resizable": true
       }
     ],

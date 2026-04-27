@@ -888,6 +888,50 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// ─── Sidebar resize ───────────────────────────────────────────────────────────
+
+const SIDEBAR_MIN = 160;
+const SIDEBAR_MAX = 420;
+const SIDEBAR_KEY = "zeck-sidebar-w";
+
+(function initSidebarResize() {
+  const handle = $("sidebar-resize-handle");
+  const shell = document.querySelector(".app-shell");
+  const saved = parseInt(localStorage.getItem(SIDEBAR_KEY), 10);
+  if (saved >= SIDEBAR_MIN && saved <= SIDEBAR_MAX) {
+    shell.style.setProperty("--sidebar-w", saved + "px");
+  }
+
+  let dragging = false;
+  let startX = 0;
+  let startW = 0;
+
+  handle.addEventListener("mousedown", (e) => {
+    dragging = true;
+    startX = e.clientX;
+    startW = parseInt(getComputedStyle(shell).getPropertyValue("--sidebar-w")) || 220;
+    handle.classList.add("dragging");
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const w = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW + (e.clientX - startX)));
+    shell.style.setProperty("--sidebar-w", w + "px");
+  });
+
+  document.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove("dragging");
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    const w = parseInt(getComputedStyle(shell).getPropertyValue("--sidebar-w")) || 220;
+    localStorage.setItem(SIDEBAR_KEY, w);
+  });
+})();
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 $("lightwalletd-url").value = SERVER_PRESETS.mainnet;

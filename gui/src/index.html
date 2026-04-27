@@ -37,6 +37,8 @@
         </div>
       </aside>
 
+      <div class="sidebar-resize-handle" id="sidebar-resize-handle" title="Drag to resize"></div>
+
       <!-- User Guide Overlay -->
       <div class="guide-overlay" id="guide-overlay" aria-modal="true" role="dialog" aria-label="User Guide" style="display:none">
         <div class="guide-panel">
@@ -213,11 +215,11 @@
             <label class="field">
               <span>Approximate wallet creation date</span>
               <input id="birthday-date" type="date" />
-              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+              <div class="inline-actions">
                 <button class="ghost" id="birthday-estimate">Estimate from this date</button>
                 <button class="ghost" id="birthday-autodetect">Auto-detect (probes node)</button>
               </div>
-              <small id="birthday-probe-status" style="color:var(--color-muted,#888)"></small>
+              <small id="birthday-probe-status" class="status-line"></small>
               <small>Pick roughly when you first created your ZecWallet Lite — ZECK will fill in the block number for you. Or use <strong>Auto-detect</strong> to probe the blockchain (requires your seed phrase from step 2).</small>
             </label>
             <label class="field">
