@@ -122,8 +122,14 @@ impl RecoveryService {
         let sessions = self.sessions.clone();
         let handle_id = handle.id.clone();
         let task = tokio::spawn(async move {
-            run_recovery_scan(state, runtime).await;
-            spawn_session_cleanup(sessions, handle_id);
+            run_recovery_scan(state.clone(), runtime).await;
+            // Keep completed sessions alive so the user can proceed to sweep
+            // at their own pace. Only clean up cancelled/error sessions after
+            // a short delay so they don't accumulate.
+            let phase = state.lock().await.progress.phase;
+            if phase != ScanPhase::Complete {
+                spawn_session_cleanup(sessions, handle_id);
+            }
         });
         *session.task.lock().await = Some(task);
 
