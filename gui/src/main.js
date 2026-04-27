@@ -466,7 +466,7 @@ async function startProgressListeners() {
         ? ` (scanned through block ${d.at_block_height.toLocaleString()})`
         : "";
       div.textContent =
-        `Found ${fmt(d.zatoshis)} on account ${d.account_index} — ${d.pool}${heightHint}`;
+        `Found ${fmt(d.zatoshis)} on account ${d.account_index} — ${d.pool}${heightHint}. Shielded scan still running — Review & Sweep will unlock when complete.`;
       const container = $("scan-discoveries");
       container.appendChild(div);
       container.style.display = "";
@@ -826,6 +826,33 @@ $("restart-flow").addEventListener("click", () => {
   $("cancel-scan").style.display = "";
 
   goTo("welcome");
+});
+
+// ─── User Guide ───────────────────────────────────────────────────────────────
+
+$("open-guide").addEventListener("click", () => {
+  $("guide-overlay").style.display = "";
+  document.body.style.overflow = "hidden";
+  $("close-guide").focus();
+});
+
+$("close-guide").addEventListener("click", () => {
+  $("guide-overlay").style.display = "none";
+  document.body.style.overflow = "";
+});
+
+$("guide-overlay").addEventListener("click", (e) => {
+  if (e.target === $("guide-overlay")) {
+    $("guide-overlay").style.display = "none";
+    document.body.style.overflow = "";
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("guide-overlay").style.display !== "none") {
+    $("guide-overlay").style.display = "none";
+    document.body.style.overflow = "";
+  }
 });
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
