@@ -494,6 +494,8 @@ async fn execute_sweep_for_session(
                     client: &mut client,
                     prover: &prover,
                     results: &mut results,
+                    prior_fee_zatoshis: total_fee_zatoshis,
+                    max_fee_zatoshis: request.max_fee_zatoshis,
                 };
                 execute_shielding_step(
                     &mut ctx,
@@ -503,10 +505,9 @@ async fn execute_sweep_for_session(
                 )
                 .await?
             };
-            total_fee_zatoshis = total_fee_zatoshis.checked_add(fee).ok_or_else(|| {
-                ZeckError::Internal("fee total overflowed the supported range".to_owned())
-            })?;
-            enforce_max_fee(total_fee_zatoshis, request.max_fee_zatoshis)?;
+            // Step already enforced the cap against (prior + step fee) before broadcast;
+            // recompute here purely to advance the running total for the next step.
+            total_fee_zatoshis = checked_fee_total(total_fee_zatoshis, fee)?;
 
             if !last_account_confirmed(&results, tracked_account.derived.index) {
                 continue;
@@ -529,6 +530,8 @@ async fn execute_sweep_for_session(
                 client: &mut client,
                 prover: &prover,
                 results: &mut results,
+                prior_fee_zatoshis: total_fee_zatoshis,
+                max_fee_zatoshis: request.max_fee_zatoshis,
             };
             execute_send_max_step(
                 &mut ctx,
@@ -539,10 +542,9 @@ async fn execute_sweep_for_session(
             )
             .await?
         };
-        total_fee_zatoshis = total_fee_zatoshis.checked_add(fee).ok_or_else(|| {
-            ZeckError::Internal("fee total overflowed the supported range".to_owned())
-        })?;
-        enforce_max_fee(total_fee_zatoshis, request.max_fee_zatoshis)?;
+        // Step already enforced the cap against (prior + step fee) before broadcast;
+        // recompute here purely to advance the running total for the next account.
+        total_fee_zatoshis = checked_fee_total(total_fee_zatoshis, fee)?;
     }
 
     Ok(results)
@@ -554,6 +556,8 @@ struct SweepStepCtx<'a> {
     client: &'a mut CompactTxStreamerClient<tonic::transport::Channel>,
     prover: &'a LocalTxProver,
     results: &'a mut Vec<TxBroadcastResult>,
+    prior_fee_zatoshis: u64,
+    max_fee_zatoshis: Option<u64>,
 }
 
 async fn execute_shielding_step(
@@ -594,6 +598,10 @@ async fn execute_shielding_step(
     )
     .map_err(|err| ZeckError::TransactionBuild(format!("building shielding proposal: {err}")))?;
     let fee_zatoshis = proposal_fee_zatoshis(&proposal)?;
+    enforce_max_fee(
+        checked_fee_total(ctx.prior_fee_zatoshis, fee_zatoshis)?,
+        ctx.max_fee_zatoshis,
+    )?;
 
     let mut standalone_keys = HashMap::new();
     standalone_keys.insert(
@@ -669,6 +677,10 @@ async fn execute_send_max_step(
     )
     .map_err(|err| ZeckError::TransactionBuild(format!("building sweep proposal: {err}")))?;
     let fee_zatoshis = proposal_fee_zatoshis(&proposal)?;
+    enforce_max_fee(
+        checked_fee_total(ctx.prior_fee_zatoshis, fee_zatoshis)?,
+        ctx.max_fee_zatoshis,
+    )?;
 
     let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
         &mut wallet_db,
@@ -918,6 +930,12 @@ fn proposal_fee_zatoshis<NoteRef>(
     })
 }
 
+fn checked_fee_total(prior_fee_zatoshis: u64, next_fee_zatoshis: u64) -> ZeckResult<u64> {
+    prior_fee_zatoshis
+        .checked_add(next_fee_zatoshis)
+        .ok_or_else(|| ZeckError::Internal("fee total overflowed the supported range".to_owned()))
+}
+
 fn enforce_max_fee(total_fee_zatoshis: u64, max_fee_zatoshis: Option<u64>) -> ZeckResult<()> {
     if let Some(max_fee_zatoshis) = max_fee_zatoshis {
         if total_fee_zatoshis > max_fee_zatoshis {
@@ -1078,6 +1096,23 @@ mod tests {
         .expect_err("proposal should fail");
 
         assert!(matches!(err, ZeckError::MaxFeeExceeded(_)));
+    }
+
+    #[test]
+    fn actual_fee_guard_rejects_before_transaction_creation() {
+        use super::{checked_fee_total, enforce_max_fee};
+        let total_fee = checked_fee_total(10_000, 10_000).expect("fee total should fit");
+        let err = enforce_max_fee(total_fee, Some(15_000)).expect_err("fee cap should fail");
+
+        assert!(matches!(err, ZeckError::MaxFeeExceeded(_)));
+    }
+
+    #[test]
+    fn actual_fee_guard_detects_overflow() {
+        use super::checked_fee_total;
+        let err = checked_fee_total(u64::MAX, 1).expect_err("fee total should overflow");
+
+        assert!(matches!(err, ZeckError::Internal(_)));
     }
 
     #[test]
