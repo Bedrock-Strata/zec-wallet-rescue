@@ -110,17 +110,18 @@ const eta = (() => {
       while (samples.length > 2 && samples[0][0] < cutoff) samples.shift();
     },
     estimate() {
-      if (startedAt == null || samples.length === 0 || !lastTotal) return { kind: "warmup" };
+      if (startedAt == null || samples.length < 2 || !lastTotal) return { kind: "warmup" };
       const [tLast, blocksLast] = samples[samples.length - 1];
       const remaining = lastTotal - blocksLast;
       if (remaining <= 0) return { kind: "done" };
-      // Use sliding window when ≥2 samples; fall back to startedAt as origin.
-      const [tFirst, blocksFirst] = samples.length >= 2 ? samples[0] : [startedAt, 0];
+      const [tFirst, blocksFirst] = samples[0];
       const windowMs = tLast - tFirst;
       const scannedInWindow = blocksLast - blocksFirst;
-      // Update cached rate only when the window has real movement.
+      // Only update the rate when blocks actually moved within the window.
       // zcash_client_sqlite commits in ~1000-block batches so scannedInWindow
-      // is 0 between commits — we keep the last rate rather than show warmup.
+      // is 0 between commits — reuse lastRate so the ETA stays visible mid-batch.
+      // Never use startedAt as the origin: on a resume scan blocks_scanned
+      // starts large, which would make the rate look astronomically high.
       if (windowMs >= 500 && scannedInWindow >= 1) {
         lastRate = scannedInWindow / (windowMs / 1000);
       }
