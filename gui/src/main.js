@@ -92,12 +92,14 @@ const eta = (() => {
   let samples = [];
   let lastTotal = 0;
   let startedAt = null;
+  let lastRate = null; // blocks/sec — reused mid-batch when scannedInWindow=0
 
   return {
     reset() {
       samples = [];
       lastTotal = 0;
       startedAt = performance.now();
+      lastRate = null;
     },
     observe(scanned, total) {
       if (!total) return;
@@ -112,14 +114,18 @@ const eta = (() => {
       const [tLast, blocksLast] = samples[samples.length - 1];
       const remaining = lastTotal - blocksLast;
       if (remaining <= 0) return { kind: "done" };
-      // Use the sliding window when ≥2 samples exist; fall back to startedAt
-      // so we can show an estimate the moment the first tick arrives.
+      // Use sliding window when ≥2 samples; fall back to startedAt as origin.
       const [tFirst, blocksFirst] = samples.length >= 2 ? samples[0] : [startedAt, 0];
       const windowMs = tLast - tFirst;
       const scannedInWindow = blocksLast - blocksFirst;
-      if (windowMs < 500 || scannedInWindow < 1) return { kind: "warmup" };
-      const rate = scannedInWindow / (windowMs / 1000);
-      const secs = Math.round(remaining / rate);
+      // Update cached rate only when the window has real movement.
+      // zcash_client_sqlite commits in ~1000-block batches so scannedInWindow
+      // is 0 between commits — we keep the last rate rather than show warmup.
+      if (windowMs >= 500 && scannedInWindow >= 1) {
+        lastRate = scannedInWindow / (windowMs / 1000);
+      }
+      if (!lastRate) return { kind: "warmup" };
+      const secs = Math.round(remaining / lastRate);
       return { kind: "range", text: formatEtaRange(secs) };
     },
   };
