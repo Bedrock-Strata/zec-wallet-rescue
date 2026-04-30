@@ -89,7 +89,6 @@ function eraHint(height) {
 // Sliding-window ETA tracker — see `EtaTracker` in zeck-cli.
 const eta = (() => {
   const WINDOW_MS = 45_000;
-  const WARMUP_MS = 15_000;
   let samples = [];
   let lastTotal = 0;
   let startedAt = null;
@@ -109,16 +108,17 @@ const eta = (() => {
       while (samples.length > 2 && samples[0][0] < cutoff) samples.shift();
     },
     estimate() {
-      if (startedAt == null || samples.length < 2 || !lastTotal) return { kind: "warmup" };
-      const [tFirst, blocksFirst] = samples[0];
+      if (startedAt == null || samples.length === 0 || !lastTotal) return { kind: "warmup" };
       const [tLast, blocksLast] = samples[samples.length - 1];
       const remaining = lastTotal - blocksLast;
       if (remaining <= 0) return { kind: "done" };
+      // Use the sliding window when ≥2 samples exist; fall back to startedAt
+      // so we can show an estimate the moment the first tick arrives.
+      const [tFirst, blocksFirst] = samples.length >= 2 ? samples[0] : [startedAt, 0];
       const windowMs = tLast - tFirst;
       const scannedInWindow = blocksLast - blocksFirst;
-      if (windowMs < 1_000 || scannedInWindow < 1) return { kind: "warmup" };
+      if (windowMs < 500 || scannedInWindow < 1) return { kind: "warmup" };
       const rate = scannedInWindow / (windowMs / 1000);
-      if (rate <= 0) return { kind: "warmup" };
       const secs = Math.round(remaining / rate);
       return { kind: "range", text: formatEtaRange(secs) };
     },
