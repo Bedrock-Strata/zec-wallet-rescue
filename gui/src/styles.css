@@ -282,7 +282,6 @@ textarea.masked {
 
 .actions,
 .inline-actions,
-.metric-panel,
 .checkline {
   display: flex;
   align-items: center;
@@ -299,10 +298,17 @@ textarea.masked {
 }
 
 .metric-panel {
-  justify-content: space-between;
-  gap: 18px;
+  display: grid;
+  grid-template-columns: auto auto auto 1fr;
+  gap: 8px 24px;
   padding: 16px 18px;
   margin-bottom: 18px;
+  align-items: start;
+}
+
+.metric-panel strong {
+  display: block;
+  word-break: break-word;
 }
 
 .metric-label {
