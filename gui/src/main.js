@@ -110,16 +110,13 @@ const eta = (() => {
     },
     estimate() {
       if (startedAt == null || samples.length < 2 || !lastTotal) return { kind: "warmup" };
-      const elapsed = performance.now() - startedAt;
       const [tFirst, blocksFirst] = samples[0];
       const [tLast, blocksLast] = samples[samples.length - 1];
       const remaining = lastTotal - blocksLast;
       if (remaining <= 0) return { kind: "done" };
       const windowMs = tLast - tFirst;
       const scannedInWindow = blocksLast - blocksFirst;
-      if (elapsed < WARMUP_MS || windowMs < 5_000 || scannedInWindow < 50) {
-        return { kind: "warmup" };
-      }
+      if (windowMs < 1_000 || scannedInWindow < 1) return { kind: "warmup" };
       const rate = scannedInWindow / (windowMs / 1000);
       if (rate <= 0) return { kind: "warmup" };
       const secs = Math.round(remaining / rate);
@@ -439,7 +436,7 @@ async function startProgressListeners() {
   $("scan-phase").textContent = "Starting…";
   $("scan-server").textContent = "Connecting…";
   $("scan-progress-text").textContent = "0 / 0";
-  $("scan-eta").textContent = "Estimating remaining time…";
+  $("scan-eta").textContent = "Calculating…";
   $("scan-progress-bar").style.width = "0%";
   $("scan-rows").innerHTML = "";
   setStatus("scan-message", "", "");
@@ -550,7 +547,7 @@ function updateScanUI(progress) {
   const etaState = eta.estimate();
   let etaText;
   if (etaState.kind === "warmup") {
-    etaText = "Estimating remaining time…";
+    etaText = "Calculating…";
   } else if (etaState.kind === "done") {
     etaText = "";
   } else {
@@ -846,7 +843,7 @@ $("restart-flow").addEventListener("click", () => {
   $("scan-phase").textContent = "Idle";
   $("scan-server").textContent = "Not connected";
   $("scan-progress-text").textContent = "0 / 0";
-  $("scan-eta").textContent = "Estimating remaining time…";
+  $("scan-eta").textContent = "Calculating…";
   $("scan-progress-bar").style.width = "0%";
   $("scan-rows").innerHTML = "";
   $("scan-discoveries").innerHTML = "";
