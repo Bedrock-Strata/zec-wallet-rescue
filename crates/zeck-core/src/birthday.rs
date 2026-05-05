@@ -265,7 +265,7 @@ async fn probe_shielded_window(
     let net = consensus_network(network);
     let timed_out = tokio::time::timeout(
         std::time::Duration::from_secs(PROBE_TIMEOUT_SECS),
-        run_wallet_sync(&workspace, &net, client),
+        run_wallet_sync(&workspace, &net, client, lightwalletd_url, None),
     )
     .await
     .is_err();

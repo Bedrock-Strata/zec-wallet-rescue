@@ -451,7 +451,14 @@ async fn execute_sweep_for_session(
     let (mut client, _) =
         connect_lightwalletd_endpoints(&runtime.lightwalletd_url, preferred_endpoint).await?;
 
-    run_wallet_sync(&workspace, &network, &mut client).await?;
+    run_wallet_sync(
+        &workspace,
+        &network,
+        &mut client,
+        &runtime.lightwalletd_url,
+        None,
+    )
+    .await?;
     refresh_scan_progress(
         &session.state,
         &workspace,
@@ -512,7 +519,14 @@ async fn execute_sweep_for_session(
                 continue;
             }
 
-            run_wallet_sync(&workspace, &network, &mut client).await?;
+            run_wallet_sync(
+                &workspace,
+                &network,
+                &mut client,
+                &runtime.lightwalletd_url,
+                None,
+            )
+            .await?;
             refresh_scan_progress(
                 &session.state,
                 &workspace,

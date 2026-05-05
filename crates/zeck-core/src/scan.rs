@@ -8,11 +8,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 use rustls::crypto::ring::default_provider;
 use secrecy::SecretVec;
 use tokio::sync::Mutex;
-use tonic::{
-    body::Body as TonicBody,
-    client::GrpcService,
-    codegen::{Body, Bytes, StdError},
-};
 use tracing::warn;
 use zcash_client_backend::{
     data_api::{
@@ -22,7 +17,6 @@ use zcash_client_backend::{
     proto::service::{
         compact_tx_streamer_client::CompactTxStreamerClient, BlockId, GetAddressUtxosArg,
     },
-    sync,
 };
 use zcash_client_sqlite::{util::SystemClock, AccountUuid, WalletDb};
 use zcash_protocol::consensus::BlockHeight;
@@ -44,7 +38,6 @@ use crate::{
 };
 
 const MAX_ACCOUNT_SCAN_COUNT: u32 = 500;
-const SYNC_BATCH_SIZE: u32 = 1_000;
 
 #[derive(Debug, Clone)]
 pub struct TrackedAccount {
@@ -304,12 +297,12 @@ async fn run_recovery_scan_inner(
             state.clone(),
             effective_birthday,
         );
-        let sync_result = run_wallet_sync_with_retry(
+        let sync_result = run_wallet_sync(
             &workspace,
             &network,
             &mut client,
             &config.lightwalletd_url,
-            &state,
+            Some(&state),
         )
         .await;
         poller.stop().await;
@@ -520,117 +513,248 @@ async fn import_accounts(
     Ok(())
 }
 
-const MAX_SYNC_RETRIES: u32 = 10;
-const SYNC_RETRY_DELAY_SECS: u64 = 5;
-
-/// Runs `run_wallet_sync`, reconnecting to lightwalletd on transient transport
-/// errors.  Each reconnection attempt tries all configured endpoints in order.
-/// Permanent errors (wallet database corruption, etc.) are returned immediately.
-async fn run_wallet_sync_with_retry(
+/// Runs the per-seed wallet sync by spawning a [`fetcher`] actor that fills the
+/// shared block cache and a [`scanner`] actor that scans the per-seed wallet
+/// against that cache. This is the single-seed integration of Phase 2 of the
+/// multi-seed scan plan.
+///
+/// Reconnect-on-transport-error logic now lives inside the fetcher (mirroring
+/// the legacy `run_wallet_sync_with_retry` heuristic), so this function only
+/// needs to await both actors and surface their results.
+///
+/// The caller's `client` is left intact: the fetcher and chain-state provider
+/// each take an owned clone, since `tonic`'s generated client is a thin wrapper
+/// around a cheap-to-clone `Channel`.
+///
+/// `state` may be `None` for callers that don't track scan-task progress
+/// (e.g. the birthday-detection probe and the post-sweep refresh in
+/// `service`); in that case user-cancellation bridging is skipped.
+///
+/// [`fetcher`]: crate::fetcher
+/// [`scanner`]: crate::scanner
+pub(crate) async fn run_wallet_sync(
     workspace: &RecoveryWorkspace,
     network: &zcash_protocol::consensus::Network,
     client: &mut CompactTxStreamerClient<tonic::transport::Channel>,
     lightwalletd_url: &str,
-    state: &SharedScanTaskState,
+    state: Option<&SharedScanTaskState>,
 ) -> ZeckResult<()> {
-    let mut attempts = 0u32;
-    loop {
-        match run_wallet_sync(workspace, network, client).await {
-            Ok(()) => return Ok(()),
-            Err(err) => {
-                let msg = err.to_string();
-                let is_transport = msg.contains("transport error")
-                    || msg.contains("h2 protocol error")
-                    || msg.contains("GoAway")
-                    || msg.contains("TimedOut")
-                    || msg.contains("close_notify")
-                    || msg.contains("UnexpectedEof");
+    use zcash_client_backend::data_api::WalletRead;
 
-                if !is_transport || attempts >= MAX_SYNC_RETRIES {
-                    return Err(err);
-                }
-
-                attempts += 1;
-                warn!(
-                    "lightwalletd connection dropped (attempt {attempts}/{MAX_SYNC_RETRIES}), reconnecting in {SYNC_RETRY_DELAY_SECS}s: {msg}"
-                );
-
-                {
-                    let mut guard = state.lock().await;
-                    guard.progress.message = Some(format!(
-                        "Connection dropped — reconnecting (attempt {attempts}/{MAX_SYNC_RETRIES})…"
-                    ));
-                }
-
-                tokio::time::sleep(std::time::Duration::from_secs(SYNC_RETRY_DELAY_SECS)).await;
-
-                match probe_lightwalletd_endpoints(lightwalletd_url).await {
-                    Ok((new_client, endpoint, _)) => {
-                        *client = new_client;
-                        let mut guard = state.lock().await;
-                        guard.progress.message = Some(format!(
-                            "Reconnected to {endpoint}, resuming sync…"
-                        ));
-                        guard.progress.server = Some(crate::lightwalletd::build_probe(
-                            endpoint,
-                            &Default::default(),
-                        ));
-                    }
-                    Err(reconnect_err) => {
-                        warn!("reconnect failed: {reconnect_err}");
-                        // try again next iteration
-                    }
-                }
-            }
-        }
-    }
-}
-
-pub(crate) async fn run_wallet_sync<ChT>(
-    workspace: &RecoveryWorkspace,
-    network: &zcash_protocol::consensus::Network,
-    client: &mut CompactTxStreamerClient<ChT>,
-) -> ZeckResult<()>
-where
-    ChT: GrpcService<TonicBody>,
-    ChT::Error: Into<StdError>,
-    ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
-    <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
-{
     let zeck_network = workspace.network();
-    let db_path =
-        crate::workspace::network_cache_db_path(workspace.data_dir(), zeck_network);
-    let lock_path =
-        crate::workspace::network_cache_lock_path(workspace.data_dir(), zeck_network);
+    let db_path = crate::workspace::network_cache_db_path(workspace.data_dir(), zeck_network);
+    let lock_path = crate::workspace::network_cache_lock_path(workspace.data_dir(), zeck_network);
+
+    // Open the shared cache writer (single-writer lock held for the duration
+    // of the run) and migrate any legacy per-workspace cache into it.
     let writer = SharedCacheWriter::open(&db_path, &lock_path).map_err(|err| match err {
         CacheOpenError::Locked => ZeckError::ScanLocked,
         other => ZeckError::Storage(format!("opening shared block cache: {other}")),
     })?;
-    // Migrate the legacy per-workspace cache into the shared cache.
-    // This is a no-op if the old file does not exist (i.e., after the first run).
     writer.migrate_from(workspace.cache_db_path()).map_err(|err| {
         ZeckError::Storage(format!(
             "migrating legacy cache {}: {err}",
             workspace.cache_db_path().display()
         ))
     })?;
-    let cache_db = writer.cache();
 
-    let mut wallet_db =
-        WalletDb::for_path(workspace.wallet_db_path(), *network, SystemClock, OsRng).map_err(
-            |err| {
-                ZeckError::Storage(format!(
-                    "opening wallet database {}: {err}",
-                    workspace.wallet_db_path().display()
+    // Determine the fetcher start height: resume from the wallet's
+    // `fully_scanned_height + 1` if any blocks were previously scanned;
+    // otherwise fall back to the wallet birthday. The fetcher must download
+    // every block the scanner might need; the scanner itself clips ranges to
+    // its birthday, so this lower bound is safe to be conservative.
+    let (start_height, scanner_birthday) = {
+        let wallet_db =
+            WalletDb::for_path(workspace.wallet_db_path(), *network, SystemClock, OsRng)
+                .map_err(|err| {
+                    ZeckError::Storage(format!(
+                        "opening wallet database {}: {err}",
+                        workspace.wallet_db_path().display()
+                    ))
+                })?;
+        let birthday = wallet_db
+            .get_wallet_birthday()
+            .map_err(|err| ZeckError::Wallet(format!("loading wallet birthday: {err}")))?
+            .ok_or_else(|| {
+                ZeckError::Wallet(
+                    "wallet has no birthday set; accounts must be imported before sync".to_owned(),
+                )
+            })?;
+        let fully_scanned = wallet_db
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .map_err(|err| ZeckError::Wallet(format!("loading wallet summary: {err}")))?
+            .map(|s| s.fully_scanned_height());
+        let start = match fully_scanned {
+            Some(h) if u32::from(h) >= u32::from(birthday) => {
+                BlockHeight::from_u32(u32::from(h).saturating_add(1))
+            }
+            _ => birthday,
+        };
+        (start, birthday)
+    };
+
+    // Open a reader handle on the same cache for the scanner. Reader and
+    // writer share the underlying SQLite file via WAL mode; this is the
+    // contract documented on `SharedCacheReader`.
+    let reader = crate::cache::SharedCacheReader::open(&db_path).map_err(|err| {
+        ZeckError::Storage(format!("opening shared cache reader: {err}"))
+    })?;
+
+    // Build a chain-state provider backed by a clone of the caller's client.
+    // `scan_cached_blocks` requires the commitment-tree state of the block
+    // immediately preceding each scan range, which lightwalletd serves via
+    // `get_tree_state`.
+    let chain_state_client = client.clone();
+    let chain_state_provider: crate::scanner::ChainStateProvider =
+        std::sync::Arc::new(move |height: BlockHeight| {
+            let mut c = chain_state_client.clone();
+            Box::pin(async move {
+                let resp = c
+                    .get_tree_state(BlockId {
+                        height: u64::from(height),
+                        hash: vec![],
+                    })
+                    .await
+                    .map_err(|err| err.to_string())?;
+                resp.into_inner()
+                    .to_chain_state()
+                    .map_err(|err| format!("decoding tree state at {height}: {err}"))
+            })
+        });
+
+    // Spawn the fetcher (consumes its client clone and the cache writer).
+    let fetcher_handle = crate::fetcher::spawn_fetcher(
+        client.clone(),
+        writer,
+        crate::fetcher::FetcherConfig {
+            start_height,
+            lightwalletd_endpoints: lightwalletd_url.to_owned(),
+        },
+    );
+
+    // Build the scanner spec. `seed_bytes` and `accounts` are unused inside
+    // the scanner's run loop (the wallet was already populated by
+    // `import_accounts` upstream), so empty placeholders are fine here.
+    let spec = crate::scanner::ScannerSpec {
+        seed_index: 0,
+        seed_fingerprint: String::new(),
+        seed_label: None,
+        birthday: scanner_birthday,
+        workspace: workspace.clone(),
+        seed_bytes: secrecy::SecretVec::new(Vec::new()),
+        accounts: Vec::new(),
+        gap_limit: 0,
+        network: *network,
+    };
+
+    // Spawn the scanner. Its cancel token is independent from the fetcher's;
+    // we'll bridge cancellation across both below.
+    let scanner_cancel = crate::fetcher::CancellationToken::new();
+    let scanner_handle = crate::scanner::spawn_scanner(
+        spec,
+        fetcher_handle.available_height.clone(),
+        reader,
+        chain_state_provider,
+        scanner_cancel.clone(),
+    );
+
+    // Bridge `state.cancelled` (set by the public cancel API) to both actor
+    // tokens. A short-lived poller is sufficient — cancellation is a rare
+    // user-initiated event and the cost of a 200ms tick is negligible.
+    let bridge_stop = Arc::new(AtomicBool::new(false));
+    let bridge_task: Option<tokio::task::JoinHandle<()>> = state.map(|s| {
+        let bridge_state = s.clone();
+        let bridge_fetcher_cancel = fetcher_handle.cancel.clone();
+        let bridge_scanner_cancel = scanner_cancel.clone();
+        let bridge_stop_clone = bridge_stop.clone();
+        tokio::spawn(async move {
+            loop {
+                if bridge_stop_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+                let cancelled = {
+                    let guard = bridge_state.lock().await;
+                    guard.cancelled.load(Ordering::SeqCst)
+                };
+                if cancelled {
+                    bridge_fetcher_cancel.cancel();
+                    bridge_scanner_cancel.cancel();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        })
+    });
+
+    let fetcher_task_cancel = fetcher_handle.cancel.clone();
+    let scanner_task_cancel = scanner_cancel.clone();
+
+    // Await both actors. If either fails, cancel the other so the failure
+    // propagates promptly rather than waiting for the survivor to finish.
+    let (fetcher_join, scanner_join) =
+        tokio::join!(fetcher_handle.task, scanner_handle.task);
+
+    // Stop the bridge task before reporting results.
+    bridge_stop.store(true, Ordering::Relaxed);
+    if let Some(task) = bridge_task {
+        let _ = task.await;
+    }
+
+    // If one side errored, ensure the other is cancelled (no-op if already
+    // exited).  Then translate the join + actor results into `ZeckResult`.
+    let fetcher_outcome = match fetcher_join {
+        Ok(inner) => inner,
+        Err(join_err) => {
+            scanner_task_cancel.cancel();
+            return Err(ZeckError::Wallet(format!(
+                "fetcher task panicked: {join_err}"
+            )));
+        }
+    };
+    let scanner_outcome = match scanner_join {
+        Ok(inner) => inner,
+        Err(join_err) => {
+            fetcher_task_cancel.cancel();
+            return Err(ZeckError::Wallet(format!(
+                "scanner task panicked: {join_err}"
+            )));
+        }
+    };
+
+    match (fetcher_outcome, scanner_outcome) {
+        (Ok(_), Ok(())) => Ok(()),
+        (Err(crate::fetcher::FetcherError::Cancelled), _)
+        | (_, Err(crate::scanner::ScannerError::Cancelled)) => {
+            // If user cancellation propagated, surface as ZeckError::Cancelled
+            // when the scan-task flag is set; otherwise treat as a generic
+            // wallet error so we don't paper over an actor self-cancelling.
+            let user_cancelled = if let Some(s) = state {
+                let guard = s.lock().await;
+                guard.cancelled.load(Ordering::SeqCst)
+            } else {
+                false
+            };
+            if user_cancelled {
+                Err(ZeckError::Cancelled)
+            } else {
+                Err(ZeckError::Wallet(
+                    "wallet sync cancelled before completion".to_owned(),
                 ))
-            },
-        )?;
-
-    sync::run(client, network, cache_db, &mut wallet_db, SYNC_BATCH_SIZE)
-        .await
-        .map_err(|err| ZeckError::Wallet(format!("synchronizing wallet workspace: {err}")))?;
-
-    Ok(())
+            }
+        }
+        (Err(fetcher_err), _) => {
+            scanner_task_cancel.cancel();
+            Err(ZeckError::Wallet(format!(
+                "synchronizing wallet workspace: {fetcher_err}"
+            )))
+        }
+        (Ok(_), Err(scanner_err)) => {
+            fetcher_task_cancel.cancel();
+            Err(ZeckError::Wallet(format!(
+                "synchronizing wallet workspace: {scanner_err}"
+            )))
+        }
+    }
 }
 
 pub(crate) async fn refresh_scan_progress(
