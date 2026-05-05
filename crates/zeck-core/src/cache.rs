@@ -51,7 +51,14 @@ pub struct SqliteBlockCache(pub(crate) StdMutex<Connection>);
 
 impl SqliteBlockCache {
     pub(crate) fn for_path(path: &std::path::Path) -> Result<Self, CacheError> {
-        Ok(Self(StdMutex::new(Connection::open(path)?)))
+        let conn = Connection::open(path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS compactblocks (
+                height INTEGER PRIMARY KEY,
+                data   BLOB NOT NULL
+            );",
+        )?;
+        Ok(Self(StdMutex::new(conn)))
     }
 
     pub(crate) fn set_journal_mode_wal(&self) -> Result<(), CacheError> {
@@ -62,6 +69,24 @@ impl SqliteBlockCache {
         // state lives here), so trading durability for write speed is fine.
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_test_block(&self, height: u32, data: &[u8]) -> Result<(), CacheError> {
+        let conn = self.0.lock().expect("cache mutex poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO compactblocks (height, data) VALUES (?1, ?2)",
+            rusqlite::params![height, data],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn count_blocks(&self) -> Result<u64, CacheError> {
+        let conn = self.0.lock().expect("cache mutex poisoned");
+        let n: u64 =
+            conn.query_row("SELECT COUNT(*) FROM compactblocks", [], |row| row.get(0))?;
+        Ok(n)
     }
 }
 
@@ -356,6 +381,43 @@ impl SharedCacheWriter {
     pub fn cache(&self) -> &SqliteBlockCache {
         &self.cache
     }
+
+    /// Copy blocks from a legacy per-workspace cache at `old_db` into this
+    /// shared cache, then delete the old file.
+    ///
+    /// If `old_db` does not exist the call is a no-op (not an error).
+    /// Existing rows in the shared cache are preserved (`INSERT OR IGNORE`),
+    /// so rows from the old cache only fill in gaps.
+    /// The old file is removed only after the copy succeeds (best-effort:
+    /// a permission error on deletion is silently ignored).
+    pub fn migrate_from(&self, old_db: &std::path::Path) -> Result<(), CacheError> {
+        if !old_db.exists() {
+            return Ok(());
+        }
+        // ATTACH requires a UTF-8 path; workspace paths are always under
+        // data_dir which is user-supplied UTF-8, so a panic here is acceptable.
+        let old_path_str = old_db
+            .to_str()
+            .expect("cache path must be valid UTF-8 (non-UTF-8 paths are not supported)");
+        let conn = self.cache.0.lock().expect("cache mutex poisoned");
+        conn.execute(
+            "ATTACH DATABASE ?1 AS old_cache",
+            rusqlite::params![old_path_str],
+        )?;
+        // INSERT OR IGNORE preserves existing rows; old rows fill in gaps.
+        let result = conn.execute(
+            "INSERT OR IGNORE INTO compactblocks (height, data) \
+             SELECT height, data FROM old_cache.compactblocks",
+            [],
+        );
+        // Always detach, even if the insert failed.
+        let _ = conn.execute("DETACH DATABASE old_cache", []);
+        result?;
+        drop(conn);
+        // Best-effort: if the file is already gone or permission-denied, continue.
+        std::fs::remove_file(old_db).ok();
+        Ok(())
+    }
 }
 
 // ─── Shared cache reader ───────────────────────────────────────────────────
@@ -434,5 +496,57 @@ mod shared_cache_tests {
         let lock = dir.path().join("blocks.lock");
         let _writer = SharedCacheWriter::open(&db, &lock).unwrap();
         let _reader = SharedCacheReader::open(&db).unwrap();
+    }
+
+    #[test]
+    fn migrate_old_cache_merges_blocks_and_deletes_source() {
+        let dir = tempdir().unwrap();
+        let old = dir.path().join("old.sqlite");
+        let new = dir.path().join("new.sqlite");
+        let lock = dir.path().join("new.lock");
+
+        {
+            let cache = SqliteBlockCache::for_path(&old).unwrap();
+            cache.insert_test_block(100, b"fakeblock-100").unwrap();
+            cache.insert_test_block(101, b"fakeblock-101").unwrap();
+        }
+
+        let writer = SharedCacheWriter::open(&new, &lock).unwrap();
+        writer.migrate_from(&old).unwrap();
+
+        assert!(!old.exists(), "old cache should be deleted on success");
+        assert_eq!(writer.cache().count_blocks().unwrap(), 2);
+    }
+
+    #[test]
+    fn migrate_missing_old_cache_is_a_noop() {
+        let dir = tempdir().unwrap();
+        let new = dir.path().join("new.sqlite");
+        let lock = dir.path().join("new.lock");
+        let writer = SharedCacheWriter::open(&new, &lock).unwrap();
+        writer
+            .migrate_from(&dir.path().join("does-not-exist.sqlite"))
+            .unwrap();
+        assert_eq!(writer.cache().count_blocks().unwrap(), 0);
+    }
+
+    #[test]
+    fn migrate_does_not_clobber_existing_blocks() {
+        let dir = tempdir().unwrap();
+        let old = dir.path().join("old.sqlite");
+        let new = dir.path().join("new.sqlite");
+        let lock = dir.path().join("new.lock");
+
+        {
+            let cache = SqliteBlockCache::for_path(&old).unwrap();
+            cache.insert_test_block(100, b"old-data").unwrap();
+        }
+
+        let writer = SharedCacheWriter::open(&new, &lock).unwrap();
+        writer.cache().insert_test_block(100, b"existing-data").unwrap();
+        writer.migrate_from(&old).unwrap();
+
+        // INSERT OR IGNORE: existing row preserved, no duplicate
+        assert_eq!(writer.cache().count_blocks().unwrap(), 1);
     }
 }
