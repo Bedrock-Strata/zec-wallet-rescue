@@ -164,3 +164,37 @@ zeck-cli sweep \
 ---
 
 *Last updated: 2026-04-15*
+
+---
+
+## Multi-Seed Recovery
+
+### Setup
+- [ ] At least two distinct test seeds available (BIP-39 mnemonics)
+- [ ] Testnet lightwalletd configured
+
+### GUI flow
+- [ ] Add 2-3 seed rows; verify each row validates independently
+- [ ] Remove a row; verify the index renumbers
+- [ ] Auto-detect birthday on a row that has no funds; verify falls back to Sapling activation
+- [ ] Start scan; verify earliest-birthday seed begins producing discoveries first
+- [ ] Mid-scan: cancel; verify all per-seed cards reach a terminal state cleanly
+- [ ] Resume after cancel: re-run with same seeds; verify each picks up at fully_scanned_height
+- [ ] Sweep all to single destination; verify per-seed sweep statuses (success / failure)
+- [ ] Sweep with one funded + one empty seed: empty seed reported as skipped, funded seed produces a TX
+
+### CLI flow
+- [ ] `zeck scan --seed "..." --birthday auto --seed "..." --birthday auto` runs both seeds
+- [ ] `zeck scan --seeds-file ./seeds.txt` works with phrase-only and `phrase|birthday` lines
+- [ ] Per-seed progress table updates in place on a TTY
+- [ ] Output is line-by-line when stdout is piped (e.g. `zeck scan ... | cat`)
+- [ ] `zeck sweep --destination zs1...` proposes per-seed sweeps; failures don't abort other seeds
+
+### Cache + lock
+- [ ] First scan creates `data_dir/cache/<network>/blocks.sqlite` and `blocks.lock`
+- [ ] Second concurrent scan in another terminal fails with "another scan is in progress"
+- [ ] Legacy per-workspace cache (`data_dir/.../<workspace>/cache.sqlite`) is migrated and removed on first multi-seed scan after upgrade
+
+### Single-seed regression
+- [ ] Single-seed CLI scan still works end-to-end
+- [ ] Single-seed GUI scan still works end-to-end
