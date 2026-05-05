@@ -118,7 +118,7 @@ pub enum ResolveError {
 ///
 /// Indexes refer to the **post-sort** position in the returned vec, matching
 /// [`ResolvedSeed::index`], so UI consumers can map warnings to rows directly.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub enum ResolveWarning {
     BirthdayDetectionFellBack {
         index: usize,
@@ -412,7 +412,7 @@ pub struct MultiSeedConfig {
     pub num_accounts: Option<u32>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub enum MultiSeedPhase {
     Resolving,
     Scanning,
@@ -426,10 +426,11 @@ pub enum MultiSeedPhase {
 /// `discoveries` is append-only across the run; each entry carries
 /// `seed_index` + `seed_fingerprint` so consumers can route them per-row.
 /// `per_seed` mirrors the latest `SeedProgress` from each scanner.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct MultiSeedProgress {
     pub phase: MultiSeedPhase,
     pub blocks_scanned: u64,
+    #[serde(with = "crate::models::serde_block_height::option")]
     pub synced_to_height: Option<BlockHeight>,
     pub discoveries: Vec<ScanDiscovery>,
     pub per_seed: Vec<SeedProgress>,

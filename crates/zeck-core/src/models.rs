@@ -3,6 +3,34 @@ use std::path::PathBuf;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use zcash_protocol::consensus::BlockHeight;
+
+/// `serde` helper for serializing [`BlockHeight`] as a plain `u32`. Use as
+/// `#[serde(with = "serde_block_height")]` on a `BlockHeight` field, or as
+/// `#[serde(with = "serde_block_height::option")]` on `Option<BlockHeight>`.
+pub(crate) mod serde_block_height {
+    use super::BlockHeight;
+    use serde::Serializer;
+
+    pub fn serialize<S: Serializer>(value: &BlockHeight, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_u32(u32::from(*value))
+    }
+
+    pub mod option {
+        use super::BlockHeight;
+        use serde::Serializer;
+
+        pub fn serialize<S: Serializer>(
+            value: &Option<BlockHeight>,
+            ser: S,
+        ) -> Result<S::Ok, S::Error> {
+            match value {
+                Some(h) => ser.serialize_some(&u32::from(*h)),
+                None => ser.serialize_none(),
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

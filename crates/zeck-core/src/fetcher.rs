@@ -124,9 +124,11 @@ pub struct FetcherSummary {
 /// Periodic progress payload (currently exposed only via `available_height`,
 /// retained as a struct so future telemetry can hang off it without breaking
 /// the actor surface).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct FetcherProgress {
+    #[serde(with = "crate::models::serde_block_height::option")]
     pub downloaded_to_height: Option<BlockHeight>,
+    #[serde(with = "crate::models::serde_block_height::option")]
     pub target_tip: Option<BlockHeight>,
     pub retry_count: u32,
 }

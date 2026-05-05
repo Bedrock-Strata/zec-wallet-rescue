@@ -81,7 +81,7 @@ pub struct ScannerSpec {
     pub network: Network,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum SeedStatus {
     Pending,
     Scanning,
@@ -90,12 +90,14 @@ pub enum SeedStatus {
     Failed(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct SeedProgress {
     pub seed_index: usize,
     pub seed_fingerprint: String,
     pub label: Option<String>,
+    #[serde(with = "crate::models::serde_block_height")]
     pub birthday: BlockHeight,
+    #[serde(with = "crate::models::serde_block_height::option")]
     pub fully_scanned_height: Option<BlockHeight>,
     pub status: SeedStatus,
 }

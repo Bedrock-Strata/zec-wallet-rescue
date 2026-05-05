@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use zeck_core::{
     detect_birthday as zeck_detect_birthday, estimate_birthday_from_date as estimate_birthday,
-    validate_destination_address, validate_mnemonic_words, BirthdayDetectResult, RecoveryService,
-    ScanConfig, ScanHandle, SweepProposal, SweepRequest, TxBroadcastResult, ZeckNetwork,
+    validate_destination_address, validate_mnemonic_words, BirthdayDetectResult, MultiScanHandle,
+    MultiSeedConfig, MultiSeedPhase, MultiSeedProgress, RecoveryService, ScanConfig, ScanHandle,
+    SeedEntry, SweepProposal, SweepRequest, TxBroadcastResult, ZeckNetwork,
 };
 
 #[derive(Clone)]
@@ -125,6 +126,121 @@ pub async fn cancel_scan(state: State<'_, AppState>, handle: ScanHandle) -> Resu
         .cancel_scan(&handle)
         .await
         .map_err(|err| err.to_string())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MultiSeedEntryInput {
+    pub phrase: String,
+    pub birthday: Option<u32>,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MultiScanConfigInput {
+    pub network: ZeckNetwork,
+    pub lightwalletd_url: String,
+    pub data_dir: String,
+    pub gap_limit: u32,
+    pub num_accounts: Option<u32>,
+}
+
+#[tauri::command]
+pub async fn start_multi_scan(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    seeds: Vec<MultiSeedEntryInput>,
+    config: MultiScanConfigInput,
+) -> Result<MultiScanHandle, String> {
+    let entries: Vec<SeedEntry> = seeds
+        .into_iter()
+        .map(|dto| SeedEntry {
+            phrase: SecretString::new(dto.phrase),
+            birthday: dto.birthday,
+            label: dto.label,
+        })
+        .collect();
+
+    let cfg = MultiSeedConfig {
+        network: config.network,
+        lightwalletd_url: config.lightwalletd_url,
+        data_dir: PathBuf::from(config.data_dir),
+        gap_limit: config.gap_limit,
+        num_accounts: config.num_accounts,
+    };
+
+    let handle = state
+        .service
+        .start_multi_scan(entries, cfg)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    spawn_multi_scan_pump(state.service.clone(), handle, app);
+    Ok(handle)
+}
+
+#[tauri::command]
+pub async fn get_multi_scan_progress(
+    state: State<'_, AppState>,
+    handle: MultiScanHandle,
+) -> Result<MultiSeedProgress, String> {
+    state
+        .service
+        .get_multi_scan_progress(&handle)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn cancel_multi_scan(
+    state: State<'_, AppState>,
+    handle: MultiScanHandle,
+) -> Result<(), String> {
+    state
+        .service
+        .cancel_multi_scan(&handle)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Background pump that samples the multi-seed run snapshot every 250ms and
+/// fans out events to the frontend. The 250ms cadence is per-pump-loop and is
+/// independent of the orchestrator's 1s internal aggregation tick — we just
+/// re-emit whatever snapshot the service exposes. Discoveries are forwarded as
+/// an append-only delta so the frontend never sees duplicates.
+fn spawn_multi_scan_pump(service: RecoveryService, handle: MultiScanHandle, app: AppHandle) {
+    tokio::spawn(async move {
+        let mut emitted_discoveries = 0usize;
+        loop {
+            let progress = match service.get_multi_scan_progress(&handle).await {
+                Ok(progress) => progress,
+                Err(_) => break,
+            };
+
+            // Self-heal in case the discovery log ever shrinks (it is
+            // contractually append-only, but be defensive).
+            if emitted_discoveries > progress.discoveries.len() {
+                emitted_discoveries = progress.discoveries.len();
+            }
+            if progress.discoveries.len() > emitted_discoveries {
+                for discovery in &progress.discoveries[emitted_discoveries..] {
+                    let _ = app.emit("multi-scan-discovery", discovery);
+                }
+                emitted_discoveries = progress.discoveries.len();
+            }
+
+            let _ = app.emit("multi-scan-progress", &progress);
+
+            if matches!(
+                progress.phase,
+                MultiSeedPhase::Completed | MultiSeedPhase::Cancelled | MultiSeedPhase::Failed(_)
+            ) {
+                let _ = app.emit("multi-scan-complete", &progress);
+                break;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    });
 }
 
 #[tauri::command]
