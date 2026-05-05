@@ -19,6 +19,11 @@ const state = {
   unlistenProgress: null,
   unlistenComplete: null,
   unlistenDiscovered: null,
+  // Multi-seed scan tracking
+  seedLabels: new Map(), // seed_index -> label string for discovery feed grouping
+  seedDiscoveryCounts: new Map(), // seed_index -> count
+  scanTerminalHandled: false,
+  notifiedTerminal: false,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -512,93 +517,109 @@ $("start-scan").addEventListener("click", async () => {
   setStatus("config-status", "Starting scan…", "");
   $("start-scan").disabled = true;
 
+  // Capture seed labels (for the discovery feed) before starting the scan.
+  state.seedLabels.clear();
+  state.seedDiscoveryCounts.clear();
+  seeds.forEach((s, idx) => {
+    state.seedLabels.set(idx, s.label || `Seed #${idx + 1}`);
+  });
+
   try {
+    resetMultiScanUI();
+    await attachMultiScanListeners();
     const handle = await invoke("start_multi_scan", { seeds, config });
     state.scanHandle = handle;
-    setStatus("config-status", `Scan started — handle ${JSON.stringify(handle)}`, "success");
+    setStatus("config-status", `Scan started`, "success");
     goTo("scan");
-    // Task 16 fills in per-seed progress UI; for now, show a placeholder.
-    $("scan-phase").textContent = "Scan started";
-    setStatus("scan-message", "Multi-seed scan running. Per-seed progress UI lands in the next task.", "");
+    setStatus("scan-message", "", "");
   } catch (err) {
+    cleanupListeners();
     setStatus("config-status", `✗ ${err}`, "error");
     $("start-scan").disabled = false;
   }
 });
 
-// ─── Step 4: Scan Progress ────────────────────────────────────────────────────
+// ─── Step 4: Multi-seed Scan Progress ────────────────────────────────────────
 
-async function startProgressListeners() {
-  $("scan-phase").textContent = "Starting…";
-  $("scan-server").textContent = "Connecting…";
-  $("scan-progress-text").textContent = "0 / 0";
-  $("scan-eta").textContent = "Estimating remaining time…";
-  $("scan-progress-bar").style.width = "0%";
-  $("scan-rows").innerHTML = "";
+function formatNumber(n) {
+  return Number(n ?? 0).toLocaleString();
+}
+
+function renderMultiPhase(phase) {
+  if (typeof phase === "string") return phase;
+  if (phase && typeof phase === "object") {
+    if ("Failed" in phase) return `Failed: ${phase.Failed}`;
+    return JSON.stringify(phase);
+  }
+  return "—";
+}
+
+function isTerminalMultiPhase(phase) {
+  if (typeof phase === "string") {
+    return phase === "Completed" || phase === "Cancelled";
+  }
+  if (phase && typeof phase === "object" && "Failed" in phase) return true;
+  return false;
+}
+
+function seedStatusLabel(status) {
+  if (typeof status === "string") return status;
+  if (status && typeof status === "object" && "Failed" in status) {
+    return `Failed: ${status.Failed}`;
+  }
+  return "—";
+}
+
+function seedStatusKind(status) {
+  if (typeof status === "string") {
+    if (status === "Done") return "done";
+    if (status === "Scanning") return "scanning";
+    if (status === "Cancelled") return "cancelled";
+    if (status === "Pending") return "pending";
+  }
+  if (status && typeof status === "object" && "Failed" in status) return "failed";
+  return "";
+}
+
+function resetMultiScanUI() {
+  $("agg-phase").textContent = "Starting…";
+  $("agg-downloaded").textContent = "—";
+  $("agg-target").textContent = "—";
+  $("agg-retries").textContent = "0";
+  $("agg-retries").classList.remove("retry-warning");
+  $("agg-blocks").textContent = "0";
+  $("agg-eta").textContent = "Estimating remaining time…";
+  $("multi-scan-warnings").innerHTML = "";
+  $("multi-scan-seeds").innerHTML = "";
+  const feed = $("multi-scan-discoveries");
+  feed.innerHTML =
+    `<p class="status-line muted" id="multi-scan-discoveries-empty">` +
+    `No funds discovered yet — discoveries will appear here as the scan finds them.</p>`;
   setStatus("scan-message", "", "");
   $("review-sweep").disabled = true;
   $("back-to-config").style.display = "none";
+  $("cancel-scan").style.display = "";
+  $("cancel-scan").disabled = false;
+  state.scanTerminalHandled = false;
+  state.notifiedTerminal = false;
+  state.seedDiscoveryCounts.clear();
   eta.reset();
+}
 
-  // Await all three subscriptions before returning. If we stored the unlisten
-  // handles via .then() callbacks, a fast scan-complete event could fire and
-  // run cleanupListeners() before the handles were assigned, leaking the
-  // subscriptions across scans.
-  $("scan-discoveries").innerHTML = "";
-  $("scan-discoveries").style.display = "none";
-
+async function attachMultiScanListeners() {
+  cleanupListeners();
   const [unlistenProgress, unlistenComplete, unlistenDiscovered] = await Promise.all([
-    listen("scan-progress", (event) => updateScanUI(event.payload)),
-    listen("scan-complete", (event) => {
-      updateScanUI(event.payload);
-      notifyScanComplete(event.payload);
+    listen("multi-scan-progress", (event) => renderMultiProgress(event.payload)),
+    listen("multi-scan-complete", (event) => {
+      renderMultiProgress(event.payload);
+      notifyMultiScanComplete(event.payload);
       cleanupListeners();
     }),
-    listen("scan-discovery", (event) => {
-      const d = event.payload;
-      const div = document.createElement("div");
-      div.className = "discovery-toast";
-      // at_block_height is the scan frontier when first observed, not the
-      // mined height of the funding transaction — label it that way.
-      const heightHint = d.at_block_height
-        ? ` (scanned through block ${d.at_block_height.toLocaleString()})`
-        : "";
-      div.textContent =
-        `Found ${fmt(d.zatoshis)} on account ${d.account_index} — ${d.pool}${heightHint}`;
-      const container = $("scan-discoveries");
-      container.appendChild(div);
-      container.style.display = "";
-    }),
+    listen("multi-scan-discovery", (event) => appendDiscovery(event.payload)),
   ]);
   state.unlistenProgress = unlistenProgress;
   state.unlistenComplete = unlistenComplete;
   state.unlistenDiscovered = unlistenDiscovered;
-}
-
-function scanCompletionSummary(progress) {
-  if (progress.error) return progress.error;
-  // Reserve "no funds were found" for actually-completed scans. A
-  // cancelled scan that hadn't yet observed any funds shouldn't claim
-  // the seed is empty — it just stopped early.
-  if (progress.phase === "cancelled") {
-    return "Scan stopped before completion. Re-run with the same flags to resume.";
-  }
-  const funded = (progress.accounts || []).filter((a) => Number(a.total_zatoshis) > 0);
-  if (funded.length === 0) return "No funds were found across all scanned accounts.";
-  const total = funded.reduce((sum, a) => sum + Number(a.total_zatoshis), 0);
-  const noun = funded.length === 1 ? "account" : "accounts";
-  return `Found ${fmt(total)} ${funded.length === 1 ? "on 1" : `across ${funded.length}`} ${noun}.`;
-}
-
-function notifyScanComplete(progress) {
-  let title;
-  switch (progress.phase) {
-    case "complete":  title = "ZECK scan complete"; break;
-    case "cancelled": title = "ZECK scan cancelled"; break;
-    case "error":     title = "ZECK scan failed"; break;
-    default: return;
-  }
-  invoke("notify_user", { title, body: scanCompletionSummary(progress) }).catch(() => {});
 }
 
 function cleanupListeners() {
@@ -610,87 +631,209 @@ function cleanupListeners() {
   state.unlistenDiscovered = null;
 }
 
-function updateScanUI(progress) {
+function renderMultiProgress(progress) {
   state.lastProgress = progress;
 
-  $("scan-phase").textContent = phaseLabel(progress.phase);
+  // Aggregate header
+  $("agg-phase").textContent = renderMultiPhase(progress.phase);
+  const dl = progress.fetcher?.downloaded_to_height;
+  const tip = progress.fetcher?.target_tip;
+  $("agg-downloaded").textContent = dl != null ? formatNumber(dl) : "—";
+  $("agg-target").textContent = tip != null ? formatNumber(tip) : "—";
+  const retries = Number(progress.fetcher?.retry_count ?? 0);
+  $("agg-retries").textContent = String(retries);
+  $("agg-retries").classList.toggle("retry-warning", retries > 0);
+  $("agg-blocks").textContent = formatNumber(progress.blocks_scanned ?? 0);
 
-  if (progress.server?.endpoint) {
-    const primary = $("lightwalletd-url").value.split(",")[0].trim();
-    const isFallback = progress.server.endpoint !== primary;
-    $("scan-server").textContent = progress.server.endpoint + (isFallback ? " (fallback)" : "");
-    $("scan-server").title = isFallback
-      ? "Connected to a fallback server — a different operator can see your scan activity"
-      : "";
+  // ETA: feed observed = downloaded delta, total = chain tip - first downloaded.
+  // We simply use blocks_scanned as the "scanned" axis and target_tip - earliest
+  // downloaded_to_height as total. If we can't compute total reliably, we use
+  // (downloaded_to + (tip - downloaded_to)) which is just `tip` — pass blocks
+  // remaining instead via a synthesized total = scanned + remaining.
+  let etaText = "Estimating remaining time…";
+  if (dl != null && tip != null && tip > dl) {
+    const remaining = Number(tip) - Number(dl);
+    const scanned = Number(progress.blocks_scanned ?? 0);
+    eta.observe(scanned, scanned + remaining);
+    const est = eta.estimate();
+    if (est.kind === "range") etaText = est.text;
+    else if (est.kind === "done") etaText = "";
   }
-
-  const scanned = Number(progress.blocks_scanned);
-  const total = Number(progress.blocks_total);
-  $("scan-progress-text").textContent =
-    `${scanned.toLocaleString()} / ${total.toLocaleString()}`;
-
-  if (total > 0) {
-    $("scan-progress-bar").style.width =
-      `${Math.min(100, (scanned / total) * 100).toFixed(1)}%`;
-  }
-
-  eta.observe(scanned, total);
-  // eraHint expects an absolute Zcash chain height. blocks_scanned is a
-  // delta from effective_birthday — passing it directly mislabels the era
-  // for any wallet whose birthday is past Sapling activation. Use
-  // synced_to_height (set by the backend) when available.
-  const era = progress.synced_to_height ? eraHint(Number(progress.synced_to_height)) : null;
-  const etaState = eta.estimate();
-  let etaText;
-  if (etaState.kind === "warmup") {
-    etaText = "Estimating remaining time…";
-  } else if (etaState.kind === "done") {
-    etaText = "";
-  } else {
-    etaText = etaState.text;
-  }
+  const synced = progress.synced_to_height;
+  const era = synced ? eraHint(Number(synced)) : null;
   if (era) etaText = etaText ? `${etaText} · scanning ~${era}` : `scanning ~${era}`;
-  $("scan-eta").textContent = etaText;
+  $("agg-eta").textContent = etaText;
 
-  if (progress.error) {
-    setStatus("scan-message", progress.error, "error");
-    $("back-to-config").style.display = "";
-  } else if (progress.message) {
-    setStatus("scan-message", progress.message, "");
-  }
+  // Warnings
+  renderResolveWarnings(progress.warnings || []);
 
-  if (progress.summary) {
-    const s = progress.summary;
-    const acctCount = progress.accounts.length;
-    $("scan-totals").textContent =
-      `Grand total: ${fmt(s.total_zatoshis)} across ${acctCount} account(s).${s.authoritative_balances ? "" : " (estimates)"}`;
-    $("scan-workspace").textContent = `Workspace: ${s.workspace_dir}`;
-  }
+  // Per-seed cards (render-once + mutate by seed_index)
+  const container = $("multi-scan-seeds");
+  (progress.per_seed || []).forEach((seed) => {
+    let card = container.querySelector(
+      `.seed-card[data-seed-index="${seed.seed_index}"]`
+    );
+    if (!card) {
+      const tmpl = $("seed-card-template");
+      card = tmpl.content.firstElementChild.cloneNode(true);
+      card.dataset.seedIndex = String(seed.seed_index);
+      container.appendChild(card);
+      // Capture label fallback if not already known.
+      if (!state.seedLabels.has(seed.seed_index)) {
+        state.seedLabels.set(
+          seed.seed_index,
+          seed.label || `Seed #${seed.seed_index + 1}`
+        );
+      }
+    }
+    updateSeedCard(card, seed);
+  });
 
-  renderAccountRows(progress.accounts);
-
-  const terminal = ["complete", "cancelled", "error"].includes(progress.phase);
-  $("cancel-scan").style.display = terminal ? "none" : "";
-  if (progress.phase === "complete") {
-    $("review-sweep").disabled = false;
+  // Terminal handling
+  if (isTerminalMultiPhase(progress.phase) && !state.scanTerminalHandled) {
+    state.scanTerminalHandled = true;
+    onMultiScanTerminal(progress);
   }
 }
 
-function renderAccountRows(accounts) {
-  const tbody = $("scan-rows");
-  tbody.innerHTML = "";
-  accounts.forEach((acc) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${acc.account_index}</td>
-      <td>${fmt(acc.sapling_zatoshis)}</td>
-      <td>${fmt(acc.orchard_zatoshis)}</td>
-      <td>${fmt(acc.transparent_zatoshis)}</td>
-      <td>${fmt(acc.total_zatoshis)}</td>
-      <td>${escapeHtml(acc.status)}</td>
-    `;
-    tbody.appendChild(tr);
-  });
+function updateSeedCard(card, seed) {
+  const label =
+    seed.label || state.seedLabels.get(seed.seed_index) || `Seed #${seed.seed_index + 1}`;
+  card.querySelector(".seed-card-label").textContent = label;
+  const fp = seed.seed_fingerprint || "";
+  card.querySelector(".seed-card-fingerprint").textContent = fp ? fp.slice(0, 12) + "…" : "";
+  card.querySelector(".seed-card-fingerprint").title = fp;
+
+  const statusEl = card.querySelector(".seed-card-status");
+  statusEl.textContent = seedStatusLabel(seed.status);
+  statusEl.dataset.kind = seedStatusKind(seed.status);
+
+  card.querySelector(".seed-card-birthday").textContent =
+    seed.birthday != null ? formatNumber(seed.birthday) : "—";
+  card.querySelector(".seed-card-scanned").textContent =
+    seed.fully_scanned_height != null ? formatNumber(seed.fully_scanned_height) : "—";
+
+  const count = state.seedDiscoveryCounts.get(seed.seed_index) ?? 0;
+  card.querySelector(".seed-card-discoveries").textContent = String(count);
+}
+
+function renderResolveWarnings(warnings) {
+  const container = $("multi-scan-warnings");
+  if (!warnings || warnings.length === 0) {
+    container.innerHTML = "";
+    return;
+  }
+  const html = warnings
+    .map((w) => {
+      if ("BirthdayDetectionFellBack" in w) {
+        const { index, fallback_height, reason } = w.BirthdayDetectionFellBack;
+        const label = state.seedLabels.get(index) || `Seed #${index + 1}`;
+        return `<div class="banner warning">${escapeHtml(label)}: birthday detection fell back to height ${formatNumber(fallback_height)} — ${escapeHtml(reason)}</div>`;
+      }
+      if ("ResumingExisting" in w) {
+        const { index, height } = w.ResumingExisting;
+        const label = state.seedLabels.get(index) || `Seed #${index + 1}`;
+        return `<div class="banner info">${escapeHtml(label)}: resuming existing workspace at height ${formatNumber(height)}.</div>`;
+      }
+      return "";
+    })
+    .join("");
+  container.innerHTML = html;
+}
+
+function appendDiscovery(d) {
+  if (!d) return;
+  const seedIdx = d.seed_index ?? 0;
+  state.seedDiscoveryCounts.set(
+    seedIdx,
+    (state.seedDiscoveryCounts.get(seedIdx) ?? 0) + 1
+  );
+
+  // Update card count if the card already exists.
+  const card = $("multi-scan-seeds").querySelector(
+    `.seed-card[data-seed-index="${seedIdx}"]`
+  );
+  if (card) {
+    card.querySelector(".seed-card-discoveries").textContent = String(
+      state.seedDiscoveryCounts.get(seedIdx)
+    );
+  }
+
+  const feed = $("multi-scan-discoveries");
+  const placeholder = $("multi-scan-discoveries-empty");
+  if (placeholder) placeholder.remove();
+
+  let group = feed.querySelector(`.discovery-group[data-seed-index="${seedIdx}"]`);
+  if (!group) {
+    const tmpl = $("seed-discovery-group-template");
+    group = tmpl.content.firstElementChild.cloneNode(true);
+    group.dataset.seedIndex = String(seedIdx);
+    const label =
+      state.seedLabels.get(seedIdx) ||
+      (d.seed_fingerprint ? `Seed ${d.seed_fingerprint.slice(0, 8)}…` : `Seed #${seedIdx + 1}`);
+    group.querySelector(".discovery-group-label").textContent = label;
+    feed.appendChild(group);
+  }
+  const count = state.seedDiscoveryCounts.get(seedIdx) ?? 0;
+  group.querySelector(".discovery-group-count").textContent =
+    count === 1 ? "1 discovery" : `${count} discoveries`;
+
+  const row = document.createElement("div");
+  row.className = "discovery-toast";
+  const heightHint = d.at_block_height
+    ? ` (scanned through block ${Number(d.at_block_height).toLocaleString()})`
+    : "";
+  row.textContent =
+    `Found ${fmt(d.zatoshis)} on account ${d.account_index} — ${d.pool}${heightHint}`;
+  group.querySelector(".discovery-group-rows").appendChild(row);
+}
+
+function multiScanCompletionSummary(progress) {
+  const total = (progress.discoveries || []).reduce(
+    (sum, d) => sum + Number(d.zatoshis ?? 0),
+    0
+  );
+  const phase = progress.phase;
+  if (typeof phase === "object" && "Failed" in phase) {
+    return `Scan failed: ${phase.Failed}`;
+  }
+  if (phase === "Cancelled") {
+    return "Scan stopped before completion. Re-run with the same flags to resume.";
+  }
+  if (total === 0) {
+    return "No funds were discovered across the scanned seeds.";
+  }
+  const seeds = (progress.per_seed || []).length;
+  return `Found ${fmt(total)} across ${seeds} seed${seeds === 1 ? "" : "s"}.`;
+}
+
+function notifyMultiScanComplete(progress) {
+  if (state.notifiedTerminal) return;
+  state.notifiedTerminal = true;
+  const phase = progress.phase;
+  let title;
+  if (phase === "Completed") title = "ZECK scan complete";
+  else if (phase === "Cancelled") title = "ZECK scan cancelled";
+  else if (typeof phase === "object" && "Failed" in phase) title = "ZECK scan failed";
+  else return;
+  invoke("notify_user", { title, body: multiScanCompletionSummary(progress) }).catch(() => {});
+}
+
+function onMultiScanTerminal(progress) {
+  $("cancel-scan").style.display = "none";
+  const phase = progress.phase;
+  if (phase === "Completed") {
+    $("review-sweep").disabled = false;
+    setStatus("scan-message", "Scan complete — review the sweep proposal.", "success");
+  } else if (phase === "Cancelled") {
+    $("back-to-config").style.display = "";
+    $("start-scan").disabled = false;
+    setStatus("scan-message", "Scan cancelled. Workspace state preserved on disk.", "");
+  } else if (typeof phase === "object" && "Failed" in phase) {
+    $("back-to-config").style.display = "";
+    $("start-scan").disabled = false;
+    setStatus("scan-message", `Scan failed: ${phase.Failed}`, "error");
+  }
 }
 
 $("back-to-config").addEventListener("click", () => {
@@ -703,15 +846,13 @@ $("back-to-config").addEventListener("click", () => {
 
 $("cancel-scan").addEventListener("click", async () => {
   if (!state.scanHandle) return;
+  $("cancel-scan").disabled = true;
   try {
-    await invoke("cancel_scan", { handle: state.scanHandle });
-    cleanupListeners();
-    setStatus("scan-message", "Scan cancelled. Workspace state preserved on disk.", "");
-    $("scan-phase").textContent = "Cancelled";
-    $("back-to-config").style.display = "";
-    $("start-scan").disabled = false;
+    await invoke("cancel_multi_scan", { handle: state.scanHandle });
+    setStatus("scan-message", "Cancelling scan…", "");
   } catch (err) {
     setStatus("scan-message", `Cancel failed: ${err}`, "error");
+    $("cancel-scan").disabled = false;
   }
 });
 
@@ -911,20 +1052,9 @@ $("restart-flow").addEventListener("click", () => {
 
   // Reset scan screen to blank state so stale results aren't visible if the
   // user navigates forward via the sidebar before starting a new scan.
-  $("scan-phase").textContent = "Idle";
-  $("scan-server").textContent = "Not connected";
-  $("scan-progress-text").textContent = "0 / 0";
-  $("scan-eta").textContent = "Estimating remaining time…";
-  $("scan-progress-bar").style.width = "0%";
-  $("scan-rows").innerHTML = "";
-  $("scan-discoveries").innerHTML = "";
-  $("scan-discoveries").style.display = "none";
-  $("scan-totals").textContent = "Grand total: 0.00000000 ZEC across 0 accounts.";
-  $("scan-workspace").textContent = "Workspace: not initialized";
-  setStatus("scan-message", "", "");
-  $("review-sweep").disabled = true;
-  $("back-to-config").style.display = "none";
-  $("cancel-scan").style.display = "";
+  resetMultiScanUI();
+  state.seedLabels.clear();
+  $("cancel-scan").disabled = false;
 
   goTo("welcome");
 });
