@@ -120,6 +120,18 @@ impl RecoveryWorkspace {
     }
 }
 
+pub fn network_cache_dir(data_dir: &Path, network: ZeckNetwork) -> PathBuf {
+    data_dir.join("cache").join(network.label())
+}
+
+pub fn network_cache_db_path(data_dir: &Path, network: ZeckNetwork) -> PathBuf {
+    network_cache_dir(data_dir, network).join("blocks.sqlite")
+}
+
+pub fn network_cache_lock_path(data_dir: &Path, network: ZeckNetwork) -> PathBuf {
+    network_cache_dir(data_dir, network).join("blocks.lock")
+}
+
 pub fn consensus_network(network: ZeckNetwork) -> Network {
     match network {
         ZeckNetwork::Mainnet => Network::MainNetwork,
@@ -333,6 +345,26 @@ mod tests {
             .to_string();
         let parts: Vec<&str> = suffix.split('/').collect();
         eprintln!("fingerprint = {}", parts[1]);
+    }
+
+    #[test]
+    fn network_cache_dir_is_scoped_by_network() {
+        use std::path::PathBuf;
+        let root = PathBuf::from("/tmp/zeck-data");
+        let mainnet = network_cache_dir(&root, ZeckNetwork::Mainnet);
+        let testnet = network_cache_dir(&root, ZeckNetwork::Testnet);
+        assert_eq!(mainnet, root.join("cache").join("mainnet"));
+        assert_eq!(testnet, root.join("cache").join("testnet"));
+        assert_ne!(mainnet, testnet);
+    }
+
+    #[test]
+    fn network_cache_db_and_lock_paths_are_under_cache_dir() {
+        use std::path::PathBuf;
+        let root = PathBuf::from("/tmp/zeck-data");
+        let dir = network_cache_dir(&root, ZeckNetwork::Mainnet);
+        assert_eq!(network_cache_db_path(&root, ZeckNetwork::Mainnet), dir.join("blocks.sqlite"));
+        assert_eq!(network_cache_lock_path(&root, ZeckNetwork::Mainnet), dir.join("blocks.lock"));
     }
 
     #[test]
