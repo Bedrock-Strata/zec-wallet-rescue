@@ -144,7 +144,7 @@ git commit -m "feat: add network-scoped cache path helpers"
 - Modify: `crates/zeck-core/Cargo.toml` (add `fs2 = "0.4"` for `FileExt::try_lock_exclusive`)
 - Test: `crates/zeck-core/src/cache.rs`
 
-Dependency note: `fs2` is widely used (downloads >10M, MIT/Apache, 0 transitive deps beyond `libc`/`winapi`). If you prefer to skip a new dep, replace with hand-rolled `flock(2)` on unix + `LockFileEx` on Windows. Default to `fs2` for simplicity.
+Dependency note: `fs2` is widely used (downloads >10M, MIT/Apache, 0 transitive deps beyond `libc`/`winapi`). **Requires explicit user approval before adding** per the project's dependency-management rules — pause and ask Zaki before running `cargo add fs2`. If declined, replace with hand-rolled `flock(2)` on unix + `LockFileEx` on Windows (~30 lines). After approval, add to `~/.claude/approved-dependencies.md`.
 
 - [ ] **Step 1: Add `fs2` to Cargo.toml dev/runtime deps**
 
@@ -264,6 +264,9 @@ impl SqliteBlockCache {
     pub(crate) fn set_journal_mode_wal(&self) -> Result<(), CacheError> {
         let conn = self.0.lock().expect("cache mutex poisoned");
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        // synchronous=NORMAL: on crash, up to one in-flight batch may need
+        // re-downloading. The cache is purely a download accelerator (no wallet
+        // state lives here), so trading durability for write speed is fine.
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Ok(())
     }
@@ -389,7 +392,7 @@ let cache_db = writer.cache(); // borrow for sync::run
 sync::run(client, network, cache_db, &mut wallet_db, SYNC_BATCH_SIZE).await...
 ```
 
-Note: derive `data_dir` from the workspace root by walking up the seed-fingerprint subdirectory layers, or — cleaner — store `data_dir` on `RecoveryWorkspace` at construction time. Check `RecoveryWorkspace::from_runtime` (workspace.rs:45) to confirm the structure and add a `pub fn data_dir(&self) -> &Path` if needed.
+Note: add `pub fn data_dir(&self) -> &Path` on `RecoveryWorkspace`. Inspect `RecoveryWorkspace::from_runtime` (workspace.rs:45) and store `data_dir: PathBuf` on the struct at construction time. Do not try to derive it by walking up from `root()`.
 
 - [ ] **Step 2: Run all existing scan tests**
 
@@ -468,6 +471,8 @@ async fn fetcher_downloads_from_min_height_and_broadcasts_progress() {
 Port the body of `run_wallet_sync_with_retry` (scan.rs:761) into `run_fetcher`, but stop calling `sync::run` and instead drive only the *download* portion: use the `client.get_block_range` streaming RPC (or whatever `zcash_client_backend::sync::run` invokes internally) to pull `CompactBlock` batches, write to cache via `BlockCache::insert`, and update the `watch` sender after each successful batch. Reuse the GoAway/transport-error classification from the existing retry function — extract it into a free function `is_transient_transport_error(err: &E) -> bool` if needed.
 
 The simplest path that minimizes risk: drive the existing `sync::run` against a no-op `WalletDb` (just a block cache writer) — but `sync::run` requires a real `WalletDb`. Instead, replicate just its download loop. Read the relevant `zcash_client_backend::sync` source (it's small) and copy the download portion only.
+
+**Risk fallback:** if extracting `sync::run`'s download loop proves brittle (private types, deep coupling to wallet-side state machine), time-box at 2 days. Fall back to running `sync::run` per-seed against the shared cache; cache reuse still happens because subsequent seeds find the blocks already inserted (the cache `BlockCache::insert` is `OR IGNORE`-shaped). This loses the "one connection" property but keeps "blocks downloaded once" — still meets the spec's primary goal. Note this fallback in the commit message if taken.
 
 - [ ] **Step 4: Run test to verify pass**
 
@@ -624,17 +629,23 @@ git commit -m "feat: multi-seed resolver with dedup, sort, birthday detection"
 - Modify: `crates/zeck-core/src/multi_seed.rs`
 - Modify: `crates/zeck-core/src/workspace.rs`
 
-- [ ] **Step 1: Add `find_existing_workspace(data_dir, network, fingerprint) -> Option<RecoveryWorkspace>`**
+- [ ] **Step 1: Add `meta.json` writing to `RecoveryWorkspace::initialize`**
 
-Walk `data_dir` for any subdirectory whose `seed_fingerprint` matches; load its stored birthday/`num_accounts`/`gap_limit` from a `meta.json` (create one if it doesn't already exist — check current workspace structure first; `RecoveryWorkspace::initialize` likely already writes one).
+Confirmed by inspection: today's workspace has no `meta.json`. Add one. `RecoveryWorkspace::initialize` (workspace.rs:70) writes `meta.json` with:
 
-- [ ] **Step 2: Write failing test**
+```json
+{ "fingerprint": "<hex>", "birthday": 2400000, "num_accounts": null, "gap_limit": 16, "network": "mainnet", "version": 1 }
+```
 
-Create a fake workspace under a tempdir, then call `find_existing_workspace` with its fingerprint and assert it returns the same path and birthday.
+Add `read_meta(root: &Path) -> Option<WorkspaceMeta>` and `write_meta(...)`.
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 2: Add `find_existing_workspace(data_dir, network, fingerprint) -> Option<RecoveryWorkspace>`**
 
-If `meta.json` doesn't exist today, also add Task 10a: write meta on `RecoveryWorkspace::initialize`. Inspect `workspace.rs:70` to confirm.
+Walk `data_dir` for subdirectories that contain a `meta.json` whose `fingerprint` and `network` match; return the first match (there should be at most one per fingerprint+network).
+
+- [ ] **Step 3: Write failing test**
+
+Create a fake workspace under a tempdir (call `initialize` to write `meta.json`), then call `find_existing_workspace` with its fingerprint and assert it returns the same path and birthday.
 
 - [ ] **Step 4: Update resolver to use existing workspace's birthday when found**
 
@@ -645,7 +656,11 @@ If `find_existing_workspace` returns Some, override the user-supplied birthday w
 Run: `cargo test -p zeck-core multi_seed::resolver`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Verify single-seed scans still resume correctly**
+
+Run a single-seed scan, kill mid-way, re-run with the same inputs. Confirm `meta.json` exists and resume picks up at the prior `fully_scanned_height`.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add crates/zeck-core/
@@ -815,9 +830,9 @@ pub async fn cancel_multi_scan(state: State<'_, AppState>, handle: MultiScanHand
 
 - [ ] **Step 2: Register in `main.rs::invoke_handler`**
 
-- [ ] **Step 3: `cargo check -p zeck-tauri` (or whatever the Tauri crate is named)**
+- [ ] **Step 3: `cargo check -p zeck-gui`**
 
-Run: `cargo check`
+Run: `cargo check -p zeck-gui`
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
