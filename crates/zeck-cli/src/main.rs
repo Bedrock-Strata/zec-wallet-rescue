@@ -938,6 +938,9 @@ impl EtaTracker {
     }
 }
 
+/// Returns a human-readable time range with rounding tuned to how uncertain we
+/// expect each band to be. Falsifies precision deliberately — at 6h out, the
+/// true error bar is larger than the estimate itself.
 fn format_eta_range(secs: u64) -> String {
     if secs < 60 {
         return "less than a minute remaining".to_string();
@@ -980,6 +983,7 @@ fn era_hint(height: u64) -> Option<String> {
 fn format_discovery(discovery: &ScanDiscovery) -> String {
     format!(
         "[scanned through block {}] account {}  +{} {}",
+        // `at_block_height` is the scan frontier when the discovery was first seen.
         discovery.at_block_height,
         discovery.account_index,
         format_zec(discovery.zatoshis),
@@ -1161,6 +1165,8 @@ fn multi_scan_completion_summary(progress: &MultiSeedProgress) -> String {
     format!("{} of {} seeds funded — {}.", funded.len(), total_seeds, zec)
 }
 
+/// AppleScript string literal: wrap in double quotes, escape backslashes
+/// and double quotes. Strip control chars to keep `osascript` happy.
 #[cfg(target_os = "macos")]
 fn applescript_quote(input: &str) -> String {
     let escaped: String = input
@@ -1175,6 +1181,8 @@ fn applescript_quote(input: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// PowerShell single-quoted string: only single-quotes need escaping (doubled).
+/// Strip control chars to avoid shell injection.
 #[cfg(target_os = "windows")]
 fn powershell_quote(input: &str) -> String {
     let escaped: String = input

@@ -29,7 +29,7 @@
 //! kept in lockstep with that helper.
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
 };
 use std::time::Duration;
@@ -138,6 +138,11 @@ pub struct FetcherHandle {
     /// Highest block height present in the shared cache. Updated after every
     /// successful batch insert.
     pub available_height: watch::Receiver<Option<BlockHeight>>,
+    /// The chain tip the fetcher is working toward. Set once after the first
+    /// successful `get_latest_block` call; `None` until that resolves.
+    pub target_tip: watch::Receiver<Option<BlockHeight>>,
+    /// Number of reconnects performed so far. Updated in real time.
+    pub retry_count: Arc<AtomicU32>,
     /// The background fetcher task. Awaitable for the final summary.
     pub task: tokio::task::JoinHandle<Result<FetcherSummary, FetcherError>>,
     /// Shared cancellation token; clone and call `.cancel()` to request a
@@ -169,15 +174,20 @@ pub fn spawn_fetcher(
     config: FetcherConfig,
 ) -> FetcherHandle {
     let (tx, rx) = watch::channel::<Option<BlockHeight>>(None);
+    let (target_tip_tx, target_tip_rx) = watch::channel::<Option<BlockHeight>>(None);
     let cancel = CancellationToken::new();
     let cancel_for_task = cancel.clone();
+    let retry_arc = Arc::new(AtomicU32::new(0));
+    let retry_arc_for_task = retry_arc.clone();
 
     let task = tokio::spawn(async move {
-        run_fetcher(client, cache_writer, config, tx, cancel_for_task).await
+        run_fetcher(client, cache_writer, config, tx, target_tip_tx, retry_arc_for_task, cancel_for_task).await
     });
 
     FetcherHandle {
         available_height: rx,
+        target_tip: target_tip_rx,
+        retry_count: retry_arc,
         task,
         cancel,
     }
@@ -188,6 +198,8 @@ async fn run_fetcher(
     cache_writer: SharedCacheWriter,
     config: FetcherConfig,
     available_tx: watch::Sender<Option<BlockHeight>>,
+    target_tip_tx: watch::Sender<Option<BlockHeight>>,
+    retry_arc: Arc<AtomicU32>,
     cancel: CancellationToken,
 ) -> Result<FetcherSummary, FetcherError> {
     let mut next_height = u32::from(config.start_height);
@@ -196,6 +208,8 @@ async fn run_fetcher(
 
     // Discover chain tip first so we have a target.
     let mut tip = fetch_tip_with_retry(&mut client, &endpoints, &cancel, &mut retry_count).await?;
+    retry_arc.store(retry_count, Ordering::Relaxed);
+    let _ = target_tip_tx.send(Some(BlockHeight::from_u32(tip)));
 
     loop {
         if cancel.is_cancelled() {
@@ -206,6 +220,7 @@ async fn run_fetcher(
             // Re-poll the tip in case new blocks landed during the run.
             let refreshed =
                 fetch_tip_with_retry(&mut client, &endpoints, &cancel, &mut retry_count).await?;
+            retry_arc.store(retry_count, Ordering::Relaxed);
             if refreshed <= tip {
                 break;
             }
@@ -237,6 +252,7 @@ async fn run_fetcher(
                     )));
                 }
                 retry_count += 1;
+                retry_arc.store(retry_count, Ordering::Relaxed);
                 warn!(
                     "fetcher: lightwalletd connection dropped (attempt {retry_count}/{MAX_FETCHER_RETRIES}), reconnecting in {FETCHER_RETRY_DELAY_SECS}s: {msg}"
                 );

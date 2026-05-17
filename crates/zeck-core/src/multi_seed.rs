@@ -10,7 +10,10 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::Ordering,
+    Arc, Mutex,
+};
 
 use async_trait::async_trait;
 use rand_core::OsRng;
@@ -112,6 +115,23 @@ pub enum ResolveError {
     /// fallback is a const for both networks; kept for forward compatibility
     /// with future network variants. `index` is the **original input** index.
     BirthdayDetectionFailed { index: usize, msg: String },
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPhrase { index, msg } => {
+                write!(f, "seed {index}: invalid phrase: {msg}")
+            }
+            Self::DuplicateFingerprint { indexes, fingerprint } => {
+                let fp_short = &fingerprint[..fingerprint.len().min(8)];
+                write!(f, "seeds {:?} share fingerprint {fp_short}…", indexes)
+            }
+            Self::BirthdayDetectionFailed { index, msg } => {
+                write!(f, "seed {index}: birthday detection failed: {msg}")
+            }
+        }
+    }
 }
 
 /// Non-fatal warning emitted during resolution.
@@ -564,7 +584,7 @@ pub async fn start_multi_seed_run(
         Ok(pair) => pair,
         Err(err) => {
             return Ok(make_terminal_run(MultiSeedProgress {
-                phase: MultiSeedPhase::Failed(format!("resolve failed: {err:?}")),
+                phase: MultiSeedPhase::Failed(format!("resolve failed: {err}")),
                 ..Default::default()
             }));
         }
@@ -774,6 +794,8 @@ fn spawn_driver(
     tokio::spawn(async move {
         let fetcher_cancel = fetcher_handle.cancel.clone();
         let fetcher_available = fetcher_handle.available_height.clone();
+        let fetcher_target_tip = fetcher_handle.target_tip.clone();
+        let fetcher_retry_count = fetcher_handle.retry_count.clone();
         let mut fetcher_task = fetcher_handle.task;
         let mut fetcher_outcome: Option<
             Result<crate::fetcher::FetcherSummary, crate::fetcher::FetcherError>,
@@ -864,8 +886,8 @@ fn spawn_driver(
                     guard.synced_to_height = max_synced.or(fetcher_height);
                     guard.fetcher = FetcherProgress {
                         downloaded_to_height: fetcher_height,
-                        target_tip: fetcher_height,
-                        retry_count: 0,
+                        target_tip: *fetcher_target_tip.borrow(),
+                        retry_count: fetcher_retry_count.load(Ordering::Relaxed),
                     };
                     if !new_discoveries.is_empty() {
                         guard.discoveries.append(&mut new_discoveries);
