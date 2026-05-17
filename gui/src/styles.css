@@ -336,7 +336,7 @@ h3 {
   display: block;
   margin-bottom: 4px;
   color: var(--accent);
-  font-family: "IBM Plex Sans", "Avenir Next", "Helvetica Neue", sans-serif;
+  font-family: "Avenir Next", "Helvetica Neue", "IBM Plex Sans", sans-serif;
   font-size: 2.25rem;
   line-height: 1;
 }
@@ -345,7 +345,7 @@ h3 {
 .surface-comparison span {
   display: block;
   color: var(--ink);
-  font-family: "IBM Plex Sans", "Avenir Next", "Helvetica Neue", sans-serif;
+  font-family: "Avenir Next", "Helvetica Neue", "IBM Plex Sans", sans-serif;
   font-size: 0.82rem;
   font-weight: 800;
   letter-spacing: 0.08em;
@@ -367,7 +367,7 @@ h3 {
 .surface-comparison {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   padding-top: 18px;
-  border-top: 1px dashed rgba(24, 37, 31, 0.18);
+  border-top: 1px solid var(--line);
 }
 
 .surface-comparison div {
@@ -870,15 +870,24 @@ select {
 
   .card-grid,
   .form-grid,
-  .surface-metrics,
   .surface-comparison {
     grid-template-columns: 1fr;
+  }
+
+  .surface-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .surface-comparison div:last-child {
     border-left: none;
     border-top: 1px solid var(--line);
     padding-left: 0;
+  }
+}
+
+@media (max-width: 520px) {
+  .surface-metrics {
+    grid-template-columns: 1fr;
   }
 }
 
