@@ -870,15 +870,24 @@ select {
 
   .card-grid,
   .form-grid,
-  .surface-metrics,
   .surface-comparison {
     grid-template-columns: 1fr;
+  }
+
+  .surface-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .surface-comparison div:last-child {
     border-left: none;
     border-top: 1px solid var(--line);
     padding-left: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .surface-metrics {
+    grid-template-columns: 1fr;
   }
 }
 
