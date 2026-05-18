@@ -35,6 +35,30 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace -- -D warnings
 
+  check-windows:
+    name: Cargo check (Windows ${{ matrix.label }})
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - label: x64
+            target: x86_64-pc-windows-msvc
+          - label: ARM64
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.87
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.87"
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (workspace)
+        run: cargo check --workspace --target ${{ matrix.target }}
+
   test:
     name: Cargo test
     runs-on: ubuntu-latest
