@@ -1152,12 +1152,27 @@ function buildSessionRow(row) {
   info.appendChild(meta);
   li.appendChild(info);
 
+  const actions = document.createElement("div");
+  actions.style.cssText = "display:flex;gap:8px;align-items:center";
+
   const btn = document.createElement("button");
   btn.className = "primary";
   btn.textContent = "Resume";
   btn.addEventListener("click", () => openResumeModal(row));
-  li.appendChild(btn);
+  actions.appendChild(btn);
 
+  const dismiss = document.createElement("button");
+  dismiss.className = "ghost";
+  dismiss.textContent = "✕";
+  dismiss.title = "Dismiss";
+  dismiss.style.cssText = "padding:8px 12px;font-size:0.88rem";
+  dismiss.addEventListener("click", () => {
+    li.remove();
+    if (!$("resume-sessions").children.length) $("resume-panel").hidden = true;
+  });
+  actions.appendChild(dismiss);
+
+  li.appendChild(actions);
   return li;
 }
 
