@@ -56,8 +56,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo check (core + cli)
-        run: cargo check -p zeck-core -p zeck-cli --target ${{ matrix.target }}
+      - name: cargo check (workspace)
+        run: cargo check --workspace --target ${{ matrix.target }}
 
   test:
     name: Cargo test
