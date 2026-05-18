@@ -108,22 +108,25 @@ table {
   flex-direction: column;
   justify-content: space-between;
   padding: 28px;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .sidebar-top {
   display: flex;
   flex-direction: column;
   flex: 1;
-  justify-content: space-between;
-  gap: 24px;
-  /* So the credit footer below has breathing room from the step list. */
+  justify-content: flex-start;
+  gap: 12px;
+  min-width: 0;
   margin-bottom: 24px;
 }
 
 .sidebar-credit {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   margin: 0;
   color: var(--muted);
   font-family: "Avenir Next", "Helvetica Neue", "IBM Plex Sans", sans-serif;
@@ -147,9 +150,10 @@ table {
 }
 
 .sidebar-credit-mark {
-  display: inline-block;
-  height: 1.6rem;
+  display: block;
+  height: 2.4rem;
   width: auto;
+  max-width: 100%;
 }
 
 .main-panel {
@@ -189,12 +193,14 @@ h1 {
 
 .sidebar-brand img {
   flex: 0 0 auto;
-  width: 54px;
-  height: 54px;
+  width: 72px;
+  height: 72px;
 }
 
 .sidebar-brand h1 {
   margin-bottom: 0;
+  font-size: 2rem;
+  line-height: 1;
 }
 
 h2 {
@@ -213,11 +219,12 @@ h3 {
   color: var(--muted);
   font-size: 1.02rem;
   line-height: 1.65;
+  overflow-wrap: break-word;
 }
 
 .step-list {
   list-style: none;
-  margin: 28px 0 0;
+  margin: 12px 0 0;
   padding: 0;
   display: grid;
   gap: 10px;
@@ -229,6 +236,7 @@ h3 {
   background: rgba(255, 255, 255, 0.44);
   color: var(--muted);
   border: 1px solid transparent;
+  overflow-wrap: break-word;
 }
 
 .step-list li.active {
@@ -276,6 +284,23 @@ h3 {
 .form-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin: 28px 0 12px;
+}
+
+.form-section-heading {
+  margin: 8px 0 0;
+  padding: 8px 0 6px;
+  font-family: "Avenir Next", "Helvetica Neue", "IBM Plex Sans", sans-serif;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border-top: 1px solid var(--line);
+}
+
+.form-section-heading:first-child {
+  border-top: none;
+  margin-top: 0;
 }
 
 .info-card,
@@ -810,6 +835,16 @@ select {
   font-size: 0.85em;
   color: var(--color-muted, #999);
   margin-top: 2px;
+}
+
+.session-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#resume-panel {
+  margin-top: 32px;
 }
 
 /* Resume modal */
