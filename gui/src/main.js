@@ -19,6 +19,8 @@ const state = {
   unlistenProgress: null,
   unlistenComplete: null,
   unlistenDiscovered: null,
+  scanConfig: null,
+  savedReportPath: null,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -517,6 +519,7 @@ $("start-scan").addEventListener("click", async () => {
     network: $("network-select").value,
     label: labelRaw || defaultScanLabel(),
   };
+  state.scanConfig = config;
 
   setStatus("config-status", "Starting scan…", "");
   $("start-scan").disabled = true;
@@ -772,6 +775,15 @@ $("review-sweep").addEventListener("click", async () => {
   }
 });
 
+$("sweep-back").addEventListener("click", () => {
+  // Re-enable Review & Sweep so the user can navigate back to sweep via the
+  // button (or left-hand menu) without having to re-run the scan.
+  if (state.lastProgress?.phase === "complete") {
+    $("review-sweep").disabled = false;
+  }
+  goTo("scan");
+});
+
 // ─── Step 5: Sweep Review ─────────────────────────────────────────────────────
 
 function renderSweepProposal(proposal) {
@@ -945,9 +957,29 @@ function renderCompleteScreen(results) {
 }
 
 function buildReport(results) {
+  const cfg = state.scanConfig;
+  const prog = state.lastProgress;
+  const accountsScanned = prog?.accounts?.length ?? "—";
+  const network = cfg?.network ?? "—";
+  const birthday = cfg?.birthday != null ? Number(cfg.birthday).toLocaleString() : "—";
+  const scanMode = cfg
+    ? (cfg.num_accounts != null
+        ? `Fixed — ${cfg.num_accounts} accounts`
+        : `Gap scan — stop after ${cfg.gap_limit} empty accounts`)
+    : "—";
+  const workspace = prog?.summary?.workspace_dir ?? "—";
+
   return [
     "ZECK Recovery Report",
     `Date: ${new Date().toISOString()}`,
+    "",
+    "Scan Summary",
+    "────────────",
+    `Network:          ${network}`,
+    `Wallet birthday:  block ${birthday}`,
+    `Accounts scanned: ${accountsScanned}`,
+    `Scan mode:        ${scanMode}`,
+    `Workspace:        ${workspace}`,
     "",
     "Transaction Results",
     "──────────────────",
@@ -980,10 +1012,21 @@ $("save-report").addEventListener("click", async () => {
       path,
       report,
     });
+    state.savedReportPath = saved;
     setStatus("save-report-status", `✓ Saved to ${saved}`, "success");
+    $("copy-report-path").style.display = "";
   } catch (err) {
     setStatus("save-report-status", `✗ ${err}`, "error");
   }
+});
+
+$("copy-report-path").addEventListener("click", () => {
+  if (!state.savedReportPath) return;
+  navigator.clipboard.writeText(state.savedReportPath).then(() => {
+    const btn = $("copy-report-path");
+    btn.textContent = "Copied!";
+    setTimeout(() => { btn.textContent = "Copy path"; }, 1400);
+  });
 });
 
 $("restart-flow").addEventListener("click", () => {
@@ -996,7 +1039,10 @@ $("restart-flow").addEventListener("click", () => {
     destination: null,
     memo: null,
     maxFeeZec: null,
+    scanConfig: null,
+    savedReportPath: null,
   });
+  $("copy-report-path").style.display = "none";
 
   seedInput.value = "";
   seedVisibility.checked = false;
@@ -1130,7 +1176,23 @@ function fmtRelativeTime(epochSeconds) {
 
 let pendingResumeRow = null;
 
-function buildSessionRow(row) {
+const DISMISSED_SESSIONS_KEY = "zeck-dismissed-sessions";
+
+function getDismissedSessions() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(DISMISSED_SESSIONS_KEY) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function dismissSession(workspacePath) {
+  const dismissed = getDismissedSessions();
+  dismissed.add(workspacePath);
+  localStorage.setItem(DISMISSED_SESSIONS_KEY, JSON.stringify([...dismissed]));
+}
+
+function buildSessionRow(row, onDismiss) {
   const li = document.createElement("li");
   li.className = "session-row";
 
@@ -1153,24 +1215,23 @@ function buildSessionRow(row) {
   li.appendChild(info);
 
   const actions = document.createElement("div");
-  actions.style.cssText = "display:flex;gap:8px;align-items:center";
+  actions.className = "session-actions";
 
-  const btn = document.createElement("button");
-  btn.className = "primary";
-  btn.textContent = "Resume";
-  btn.addEventListener("click", () => openResumeModal(row));
-  actions.appendChild(btn);
+  const resumeBtn = document.createElement("button");
+  resumeBtn.className = "primary";
+  resumeBtn.textContent = "Resume";
+  resumeBtn.addEventListener("click", () => openResumeModal(row));
+  actions.appendChild(resumeBtn);
 
-  const dismiss = document.createElement("button");
-  dismiss.className = "ghost";
-  dismiss.textContent = "✕";
-  dismiss.title = "Dismiss";
-  dismiss.style.cssText = "padding:8px 12px;font-size:0.88rem";
-  dismiss.addEventListener("click", () => {
-    li.remove();
-    if (!$("resume-sessions").children.length) $("resume-panel").hidden = true;
+  const dismissBtn = document.createElement("button");
+  dismissBtn.className = "ghost";
+  dismissBtn.textContent = "✕";
+  dismissBtn.title = "Dismiss from list";
+  dismissBtn.addEventListener("click", () => {
+    dismissSession(row.workspace_path);
+    onDismiss();
   });
-  actions.appendChild(dismiss);
+  actions.appendChild(dismissBtn);
 
   li.appendChild(actions);
   return li;
@@ -1186,6 +1247,8 @@ async function refreshResumePanel() {
     console.warn("list_incomplete_sessions failed:", err);
     rows = [];
   }
+  const dismissed = getDismissedSessions();
+  rows = rows.filter((r) => !dismissed.has(r.workspace_path));
   const panel = $("resume-panel");
   const list = $("resume-sessions");
   list.innerHTML = "";
@@ -1193,7 +1256,7 @@ async function refreshResumePanel() {
     panel.hidden = true;
     return;
   }
-  for (const row of rows) list.appendChild(buildSessionRow(row));
+  for (const row of rows) list.appendChild(buildSessionRow(row, refreshResumePanel));
   panel.hidden = false;
 }
 
