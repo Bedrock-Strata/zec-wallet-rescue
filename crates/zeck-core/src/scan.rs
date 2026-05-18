@@ -2248,12 +2248,12 @@ mod tests {
             // ─── Initial scan: import + scan one empty block ─────────────────
             let workspace1 = RecoveryWorkspace::from_runtime(&config).expect("workspace");
             workspace1
-                .initialize(config.network, &seed)
+                .initialize(config.network, seed.expose_secret())
                 .expect("workspace.initialize");
             import_accounts(
                 &workspace1,
                 config.network,
-                &seed,
+                seed.expose_secret(),
                 &test_birthday(),
                 &transparent_account,
                 &accounts,
@@ -2324,7 +2324,7 @@ mod tests {
             // ─── Resume: same config must reuse the on-disk wallet DB ────────
             let workspace2 = RecoveryWorkspace::from_runtime(&config).expect("workspace (resume)");
             workspace2
-                .initialize(config.network, &seed)
+                .initialize(config.network, seed.expose_secret())
                 .expect("workspace2.initialize");
             assert_eq!(
                 workspace2.wallet_db_path(),
