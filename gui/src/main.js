@@ -1176,7 +1176,23 @@ function fmtRelativeTime(epochSeconds) {
 
 let pendingResumeRow = null;
 
-function buildSessionRow(row) {
+const DISMISSED_SESSIONS_KEY = "zeck-dismissed-sessions";
+
+function getDismissedSessions() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(DISMISSED_SESSIONS_KEY) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function dismissSession(workspacePath) {
+  const dismissed = getDismissedSessions();
+  dismissed.add(workspacePath);
+  localStorage.setItem(DISMISSED_SESSIONS_KEY, JSON.stringify([...dismissed]));
+}
+
+function buildSessionRow(row, onDismiss) {
   const li = document.createElement("li");
   li.className = "session-row";
 
@@ -1198,11 +1214,26 @@ function buildSessionRow(row) {
   info.appendChild(meta);
   li.appendChild(info);
 
-  const btn = document.createElement("button");
-  btn.className = "primary";
-  btn.textContent = "Resume";
-  btn.addEventListener("click", () => openResumeModal(row));
-  li.appendChild(btn);
+  const actions = document.createElement("div");
+  actions.className = "session-actions";
+
+  const resumeBtn = document.createElement("button");
+  resumeBtn.className = "primary";
+  resumeBtn.textContent = "Resume";
+  resumeBtn.addEventListener("click", () => openResumeModal(row));
+  actions.appendChild(resumeBtn);
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.className = "ghost";
+  dismissBtn.textContent = "✕";
+  dismissBtn.title = "Dismiss from list";
+  dismissBtn.addEventListener("click", () => {
+    dismissSession(row.workspace_path);
+    onDismiss();
+  });
+  actions.appendChild(dismissBtn);
+
+  li.appendChild(actions);
 
   return li;
 }
@@ -1217,6 +1248,8 @@ async function refreshResumePanel() {
     console.warn("list_incomplete_sessions failed:", err);
     rows = [];
   }
+  const dismissed = getDismissedSessions();
+  rows = rows.filter((r) => !dismissed.has(r.workspace_path));
   const panel = $("resume-panel");
   const list = $("resume-sessions");
   list.innerHTML = "";
@@ -1224,7 +1257,7 @@ async function refreshResumePanel() {
     panel.hidden = true;
     return;
   }
-  for (const row of rows) list.appendChild(buildSessionRow(row));
+  for (const row of rows) list.appendChild(buildSessionRow(row, refreshResumePanel));
   panel.hidden = false;
 }
 
